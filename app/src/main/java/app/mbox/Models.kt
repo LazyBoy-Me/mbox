@@ -53,4 +53,8 @@ data class StreamRes(
     val duration: Int,
     val name: String,
     val sourceUrl: String,
+    /** Direct CDN url from the web BFF. */
+    val url: String = "",
+    /** Referer the CDN requires (`https://movie-box.co/movies/<slug>`). */
+    val referer: String = "",
 )

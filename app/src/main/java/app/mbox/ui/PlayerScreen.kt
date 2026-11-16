@@ -41,7 +41,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -73,12 +72,13 @@ import app.mbox.Dub
 import app.mbox.PlaySpec
 import app.mbox.StreamRes
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
-private const val PLACEHOLDER_MSG =
-    "MovieBox is serving its short \"Upgrade Guide\" promo clip instead of this title. " +
-        "The server refuses real streams for this account right now, so there is nothing to play. " +
-        "Try again later."
+private fun fmtSize(bytes: Long): String = when {
+    bytes <= 0L -> ""
+    bytes >= 1_000_000_000L -> String.format("%.2f GB", bytes / 1_000_000_000.0)
+    bytes >= 1_000_000L -> String.format("%.0f MB", bytes / 1_000_000.0)
+    else -> "${bytes / 1000} KB"
+}
 
 private fun Context.findActivity(): Activity? {
     var c: Context? = this
@@ -99,7 +99,6 @@ private fun isH264(codec: String): Boolean {
 fun PlayerScreen(spec: PlaySpec, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val activity = remember(ctx) { ctx.findActivity() }
-    val scope = rememberCoroutineScope()
     val player = remember { ExoPlayer.Builder(ctx).build() }
 
     var dubs by remember { mutableStateOf<List<Dub>>(emptyList()) }
@@ -123,14 +122,17 @@ fun PlayerScreen(spec: PlaySpec, onBack: () -> Unit) {
     var seeking by remember { mutableStateOf(false) }
     var seekValue by remember { mutableStateOf(0f) }
 
-    fun setSource(item: StreamRes, url: String, startMs: Long) {
+    fun setSource(item: StreamRes, startMs: Long) {
+        // The CDN only serves bytes to requests carrying the web player's Referer (and a browser
+        // UA); without it the edge answers 429. Both are pinned on the data source.
         val dataSource = DefaultHttpDataSource.Factory()
-            .setUserAgent(Api.PLAYER_UA)
+            .setUserAgent(Api.WEB_UA)
+            .setDefaultRequestProperties(mapOf("Referer" to item.referer))
             .setConnectTimeoutMs(20_000)
             .setReadTimeoutMs(30_000)
             .setAllowCrossProtocolRedirects(true)
         val media = ProgressiveMediaSource.Factory(dataSource)
-            .createMediaSource(MediaItem.fromUri(url))
+            .createMediaSource(MediaItem.fromUri(item.url))
         player.setMediaSource(media)
         player.prepare()
         if (startMs > 0) player.seekTo(startMs)
@@ -168,7 +170,7 @@ fun PlayerScreen(spec: PlaySpec, onBack: () -> Unit) {
         resumeAt = 0L
         error = null
         status = "Preparing stream…"
-        val list = runCatching { Api.resources(activeDub, spec.se, spec.ep) }.getOrNull()
+        val list = runCatching { Api.h5Play(activeDub, spec.se, spec.ep) }.getOrNull()
         if (list == null) {
             status = null
             error = "Couldn't load the stream list. Check your connection and retry."
@@ -180,53 +182,18 @@ fun PlayerScreen(spec: PlaySpec, onBack: () -> Unit) {
             error = "No stream available for this title."
             return@LaunchedEffect
         }
-        var fake = 0
-        var blocked = false
-        for (item in orderCandidates(list)) {
-            status = "Opening ${item.resolution}p…"
-            val info = runCatching { Api.sniffInfo(item.sourceUrl, activeDub) }.getOrNull()
-            if (info == null) continue
-            if (info.looksLikePlaceholder) {
-                fake++
-                if (fake >= 2) {
-                    blocked = true
-                    break
-                }
-                continue
-            }
-            val bytes = runCatching { Api.probeSize(info.url) }.getOrNull()
-            if (bytes != null && bytes < Api.MIN_REAL_BYTES) {
-                fake++
-                if (fake >= 2) {
-                    blocked = true
-                    break
-                }
-                continue
-            }
-            setSource(item, info.url, start)
-            return@LaunchedEffect
-        }
-        status = null
-        error = if (blocked) PLACEHOLDER_MSG else "No playable stream for this title."
+        val first = orderCandidates(list).first()
+        status = "Opening ${first.resolution}p…"
+        setSource(first, start)
     }
 
     fun switchQuality(item: StreamRes) {
         if (item === current) return
+        if (item.url.isEmpty()) return
         val pos = player.currentPosition.coerceAtLeast(0)
-        scope.launch {
-            error = null
-            status = "Switching to ${item.resolution}p…"
-            val info = runCatching { Api.sniffInfo(item.sourceUrl, activeDub) }.getOrNull()
-            val bytes = info?.let { runCatching { Api.probeSize(it.url) }.getOrNull() }
-            val ok = info != null && !info.looksLikePlaceholder &&
-                (bytes == null || bytes >= Api.MIN_REAL_BYTES)
-            if (ok && info != null) {
-                setSource(item, info.url, pos)
-            } else {
-                status = null
-                error = "That quality isn't available right now."
-            }
-        }
+        error = null
+        status = "Switching to ${item.resolution}p…"
+        setSource(item, pos)
     }
 
     fun switchAudio(dub: Dub) {
@@ -501,7 +468,8 @@ fun PlayerScreen(spec: PlaySpec, onBack: () -> Unit) {
                 items.forEach { item ->
                     PanelRow(
                         label = "${item.resolution}p",
-                        tag = codecLabel(item.codec),
+                        tag = listOf(codecLabel(item.codec), fmtSize(item.size))
+                            .filter { it.isNotBlank() }.joinToString(" · "),
                         selected = item === current,
                         onClick = {
                             showQuality = false

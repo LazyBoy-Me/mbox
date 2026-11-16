@@ -40,6 +40,20 @@ object Api {
     private const val UA = "com.community.mbox.in/50020042 (Linux; Android 14; Pixel 7; Cronet/133.0.6876.3)"
     const val PLAYER_UA = "ExoPlayerLib/2.19.1"
 
+    // Real playback comes from the web (h5) BFF, not the mobile play-info endpoints: the mobile
+    // ones answer with a 23s "Upgrade Guide" promo for every title. The h5 endpoint is unsigned but
+    // is gated on the Referer header of the web player page, and the CDN wants that same Referer.
+    private const val H5_BASE = "https://h5-api.aoneroom.com/wefeed-h5api-bff"
+    const val WEB_UA =
+        "Mozilla/5.0 (Linux; Android 12; M2004J19C) AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/120.0.0.0 Mobile Safari/537.36"
+    private const val WEB_ORIGIN = "https://movie-box.co"
+
+    /** Per-subject web slug (`detailPath`); needed by the h5 player calls. */
+    private val slugCache = HashMap<String, String>()
+
+    fun webReferer(slug: String): String = "$WEB_ORIGIN/movies/$slug"
+
     private val jsonMedia = CTYPE.toMediaType()
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -339,15 +353,95 @@ object Api {
             )
         }
 
-    /** Total size of a media file via a 1-byte range request; null when the server won't say. */
-    suspend fun probeSize(url: String): Long? = withContext(Dispatchers.IO) {
+    // ---------------------------------------------------------------- web (h5) playback
+
+    /** Resolves the web slug of a subject, e.g. `lucifer-hindi-Aq2Bzbvyte1`. */
+    suspend fun detailPath(subjectId: String): String = withContext(Dispatchers.IO) {
+        slugCache[subjectId]?.let { return@withContext it }
+        ensureToken()
+        val data = call("/subject-api/get?subjectId=$subjectId")
+        val url = data.optJSONObject("data")?.optString("detailUrl").orEmpty()
+        val slug = url.trimEnd('/').substringAfterLast('/')
+        if (slug.isNotEmpty()) slugCache[subjectId] = slug
+        slug
+    }
+
+    private fun h5Get(path: String, slug: String): JSONObject {
         val req = Request.Builder()
-            .url(url)
-            .header("User-Agent", PLAYER_UA)
-            .header("Range", "bytes=0-0")
+            .url(H5_BASE + path)
+            .header("User-Agent", WEB_UA)
+            .header("Accept", "application/json")
+            .header("Origin", WEB_ORIGIN)
+            .header("Referer", webReferer(slug))
+            .header("X-Source", "web")
+            .header("X-Vip-Restrict", "false")
+            .header("X-Client-Info", JSONObject().put("timezone", java.util.TimeZone.getDefault().id).toString())
             .build()
+        return client.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            runCatching { JSONObject(text) }.getOrElse { JSONObject().put("raw", text) }
+        }
+    }
+
+    /**
+     * Playable streams for a movie or one episode, straight from the web BFF.
+     *
+     * Movies are addressed as `se=0&ep=0`; series episodes are 1-based. The catalog is not
+     * consistent, so both shapes are tried.
+     */
+    suspend fun h5Play(subjectId: String, se: Int, ep: Int): List<StreamRes> = withContext(Dispatchers.IO) {
+        val slug = runCatching { detailPath(subjectId) }.getOrNull().orEmpty()
+        if (slug.isEmpty()) return@withContext emptyList()
+
+        fun attempt(aSe: Int, aEp: Int): List<StreamRes> {
+            val query = "subjectId=$subjectId&se=$aSe&ep=$aEp" +
+                "&detailPath=" + URLEncoder.encode(slug, "UTF-8") + "&streamSignType=1"
+            val data = runCatching { h5Get("/subject/play?$query", slug) }.getOrNull()
+                ?: return emptyList()
+            val arr = data.optJSONObject("data")?.optJSONArray("streams") ?: return emptyList()
+            val out = ArrayList<StreamRes>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val url = o.optString("url")
+                if (url.isEmpty()) continue
+                out.add(
+                    StreamRes(
+                        resolution = o.optString("resolutions").toIntOrNull() ?: 0,
+                        codec = o.optString("codecName"),
+                        size = o.optString("size").toLongOrNull() ?: 0L,
+                        duration = o.optInt("duration", 0),
+                        name = "${o.optString("resolutions")}p ${o.optString("codecName")}".trim(),
+                        url = url,
+                        referer = webReferer(slug),
+                        sourceUrl = url,
+                    )
+                )
+            }
+            return out.sortedWith(
+                compareByDescending<StreamRes> { it.resolution }.thenBy { if (isH264(it.codec)) 0 else 1 }
+            )
+        }
+
+        val wanted = attempt(se, ep)
+        if (wanted.isNotEmpty()) return@withContext wanted
+        val other = if (se == 0 && ep == 0) attempt(1, 1) else attempt(0, 0)
+        other
+    }
+
+    private fun isH264(codec: String): Boolean {
+        val c = codec.lowercase()
+        return c == "h264" || c == "avc" || c == "avc1"
+    }
+
+    /** Total size of a media file via a 1-byte range request; null when the server won't say. */
+    suspend fun probeSize(url: String, referer: String? = null): Long? = withContext(Dispatchers.IO) {
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", if (referer != null) WEB_UA else PLAYER_UA)
+            .header("Range", "bytes=0-0")
+        referer?.let { builder.header("Referer", it) }
         runCatching {
-            client.newCall(req).execute().use { resp ->
+            client.newCall(builder.build()).execute().use { resp ->
                 val range = resp.header("Content-Range")
                 val total = range?.substringAfterLast('/')?.toLongOrNull()
                 when {
@@ -362,12 +456,10 @@ object Api {
     /** Anything under this is the placeholder/promo clip, never a real movie or episode. */
     const val MIN_REAL_BYTES = 5_000_000L
 
-    /** resources -> sniff for the requested resolution (falls back to the best one). */
-    suspend fun stream(subjectId: String, se: Int, ep: Int, resolution: Int? = null): Pair<String, StreamRes>? {
-        val list = resources(subjectId, se, ep)
+    /** Real stream for the requested resolution (falls back to the best available). */
+    suspend fun stream(subjectId: String, se: Int, ep: Int, resolution: Int? = null): StreamRes? {
+        val list = h5Play(subjectId, se, ep)
         if (list.isEmpty()) return null
-        val pick = list.firstOrNull { resolution != null && it.resolution == resolution } ?: list.first()
-        val url = runCatching { sniff(pick.sourceUrl, subjectId) }.getOrNull() ?: return null
-        return url to pick
+        return list.firstOrNull { resolution != null && it.resolution == resolution } ?: list.first()
     }
 }
