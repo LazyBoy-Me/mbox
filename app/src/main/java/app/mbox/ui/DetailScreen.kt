@@ -104,7 +104,10 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
             busy = false
             status = null
             if (url != null) {
-                onPlay(url, "${detail.title} · ${picked.resolution}p ${codecLabel(picked.codec)}")
+                val lang = dubs.firstOrNull { it.id == activeId }?.let { langLabel(it) }
+                val tag = listOfNotNull(lang, "${picked.resolution}p ${codecLabel(picked.codec)}")
+                    .joinToString(" · ")
+                onPlay(url, "${detail.title} · $tag")
             } else {
                 status = "Stream resolve failed, try another quality."
             }

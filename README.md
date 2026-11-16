@@ -8,9 +8,11 @@ detail page with season/episode picker and a quality chooser, then fullscreen pl
 
 1. `GET /subject-api/search-rank/v2` + `POST /subject-api/trending/v2` build the home feed.
 2. `POST /subject-api/search` powers search.
-3. Detail: `GET /subject-api/get`, `GET /subject-api/season-info/v2`.
-4. Playback pipeline: `GET /subject-api/resource/v2` → `sourceUrl` → `GET /sniff/config` → `downloadUrl`
-   (real signed CDN MP4). The CDN only accepts a player user-agent (`ExoPlayerLib/2.19.1`), no Referer.
+3. Detail: `GET /subject-api/get`, `GET /subject-api/season-info/v2`, `GET /subject-api/dub-info`
+   (audio tracks: Original / Hindi / Bengali / Telugu …; every dub is its own `subjectId`).
+4. Playback pipeline: `GET /subject-api/resource/v2` (paginated, 20 per page) → `sourceUrl` →
+   `GET /sniff/config` → `downloadUrl` (real signed CDN MP4). The CDN only accepts a player
+   user-agent (`ExoPlayerLib/2.19.1`), no Referer.
 5. Requests are signed with HMAC-MD5 over the canonical string
    `METHOD\naccept\ncontent-type\nbodyLen\nts\nmd5(body)\npath?sortedQuery` → `x-tr-signature: <ts>|2|<b64>`.
    A guest token from `/user-api/visitor-login` is fetched silently; no account or VIP is needed.
@@ -35,4 +37,6 @@ gradle assembleDebug
 ## Notes
 
 - HEVC 1080p/720p streams play fine in the app (ExoPlayer); browsers usually cannot decode them.
-- Package `app.mbox` (debug variant is `app.mbox.debug`, so it can be installed side by side).
+- The quality picker lists every codec per resolution (HEVC / H.264), so if a chipset chokes on
+  HEVC the H.264 entry still works.
+- Package `app.mbox`.
