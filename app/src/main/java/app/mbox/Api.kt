@@ -1,8 +1,11 @@
 package app.mbox
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Base64
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -42,18 +45,21 @@ object Api {
 
     private var deviceId: String = ""
     private var gaid: String = ""
+    private var prefs: SharedPreferences? = null
 
     @Volatile
     private var token: String? = null
 
     fun init(ctx: Context) {
         val sp = ctx.getSharedPreferences("mbox", Context.MODE_PRIVATE)
+        prefs = sp
         deviceId = sp.getString("device_id", null) ?: UUID.randomUUID().toString().replace("-", "").also {
             sp.edit().putString("device_id", it).apply()
         }
         gaid = sp.getString("gaid", null) ?: UUID.randomUUID().toString().also {
             sp.edit().putString("gaid", it).apply()
         }
+        token = sp.getString("token", null)?.takeIf { it.isNotEmpty() }
     }
 
     // ---------------------------------------------------------------- signing
@@ -108,32 +114,52 @@ object Api {
 
     private suspend fun call(path: String, method: String = "GET", bodyJson: String? = null): JSONObject =
         withContext(Dispatchers.IO) {
-            val url = BASE + path
-            val body = (bodyJson ?: "").toByteArray()
-            val ts = System.currentTimeMillis().toString()
-            val builder = Request.Builder().url(url)
-            if (method == "POST") builder.post(body.toRequestBody(jsonMedia))
-
-            builder.header("User-Agent", UA)
-            builder.header("Accept", ACCEPT)
-            builder.header("Content-Type", CTYPE)
-            builder.header("x-client-token", "$ts," + md5Hex(ts.reversed().toByteArray()))
-            builder.header("x-tr-signature", "$ts|2|" + hmacMd5Base64(canonical(method, url, body, ts)))
-            builder.header("x-client-info", clientInfo())
-            builder.header("x-client-status", "0")
-            token?.let { builder.header("Authorization", "Bearer $it") }
-
-            client.newCall(builder.build()).execute().use { resp ->
-                val text = resp.body?.string().orEmpty()
-                runCatching { JSONObject(text) }.getOrElse { JSONObject().put("raw", text) }
+            var last: Exception? = null
+            repeat(3) { attempt ->
+                try {
+                    return@withContext callOnce(path, method, bodyJson)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    last = e
+                }
+                delay(700L * (attempt + 1))
             }
+            throw last ?: java.io.IOException("request failed: $path")
         }
 
+    private fun callOnce(path: String, method: String, bodyJson: String?): JSONObject {
+        val url = BASE + path
+        val body = (bodyJson ?: "").toByteArray()
+        val ts = System.currentTimeMillis().toString()
+        val builder = Request.Builder().url(url)
+        if (method == "POST") builder.post(body.toRequestBody(jsonMedia))
+
+        builder.header("User-Agent", UA)
+        builder.header("Accept", ACCEPT)
+        builder.header("Content-Type", CTYPE)
+        builder.header("x-client-token", "$ts," + md5Hex(ts.reversed().toByteArray()))
+        builder.header("x-tr-signature", "$ts|2|" + hmacMd5Base64(canonical(method, url, body, ts)))
+        builder.header("x-client-info", clientInfo())
+        builder.header("x-client-status", "0")
+        token?.let { builder.header("Authorization", "Bearer $it") }
+
+        client.newCall(builder.build()).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            return runCatching { JSONObject(text) }.getOrElse { JSONObject().put("raw", text) }
+        }
+    }
+
+    /** Fetches (and caches) a guest token. Search/detail require one; playback does not. */
     suspend fun ensureToken() {
         if (token != null) return
         runCatching {
             val data = call("/user-api/visitor-login", "POST", JSONObject().put("deviceId", deviceId).toString())
-            token = data.optJSONObject("data")?.optString("token")?.takeIf { it.isNotEmpty() }
+            val fresh = data.optJSONObject("data")?.optString("token")?.takeIf { it.isNotEmpty() }
+            if (fresh != null) {
+                token = fresh
+                prefs?.edit()?.putString("token", fresh)?.apply()
+            }
         }
     }
 
@@ -186,6 +212,7 @@ object Api {
     }
 
     suspend fun search(keyword: String): List<Subject> = withContext(Dispatchers.IO) {
+        ensureToken()
         val body = JSONObject()
             .put("keyword", keyword)
             .put("type", 0)
@@ -197,12 +224,14 @@ object Api {
     }
 
     suspend fun detail(subjectId: String): Subject = withContext(Dispatchers.IO) {
+        ensureToken()
         val data = call("/subject-api/get?subjectId=$subjectId")
         val o = data.optJSONObject("data") ?: JSONObject()
         subjectOf(o)
     }
 
     suspend fun seasons(subjectId: String): List<Season> = withContext(Dispatchers.IO) {
+        ensureToken()
         val data = call("/subject-api/season-info/v2?subjectId=$subjectId")
         val arr = data.optJSONObject("data")?.optJSONArray("seasons") ?: return@withContext emptyList()
         (0 until arr.length()).mapNotNull { i ->

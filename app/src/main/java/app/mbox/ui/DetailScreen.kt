@@ -61,7 +61,7 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(initial.id) {
-        runCatching { Api.detail(initial.id) }.onSuccess { detail = it }
+        runCatching { Api.detail(initial.id) }.onSuccess { if (it.title.isNotBlank()) detail = it }
         if (initial.isSeries) {
             runCatching { Api.seasons(initial.id) }.onSuccess { list ->
                 seasons = list

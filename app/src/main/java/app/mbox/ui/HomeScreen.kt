@@ -53,7 +53,10 @@ fun HomeScreen(onOpen: (Subject) -> Unit, onSearch: () -> Unit) {
             .onSuccess { sections = it }
             .onFailure { error = it.message }
         runCatching { Api.trending(1) }
-            .onSuccess { trending = it }
+            .onSuccess { first ->
+                val more = runCatching { Api.trending(2) }.getOrDefault(emptyList())
+                trending = (first + more).distinctBy { it.id }
+            }
         loading = false
     }
 
