@@ -16,6 +16,13 @@ data class Subject(
 
 data class HotSection(val name: String, val items: List<Subject>)
 
+data class Dub(
+    val id: String,
+    val name: String,
+    val code: String,
+    val original: Boolean,
+)
+
 data class Season(val se: Int, val maxEp: Int)
 
 data class StreamRes(

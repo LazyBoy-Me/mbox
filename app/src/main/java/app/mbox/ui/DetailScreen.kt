@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import app.mbox.Api
+import app.mbox.Dub
 import app.mbox.Season
 import app.mbox.StreamRes
 import app.mbox.Subject
@@ -52,6 +53,8 @@ import kotlinx.coroutines.launch
 fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) -> Unit) {
     var detail by remember { mutableStateOf(initial) }
     var seasons by remember { mutableStateOf<List<Season>>(emptyList()) }
+    var dubs by remember { mutableStateOf<List<Dub>>(emptyList()) }
+    var activeId by remember { mutableStateOf(initial.id) }
     var selSe by remember { mutableStateOf(1) }
     var selEp by remember { mutableStateOf(1) }
     var busy by remember { mutableStateOf(false) }
@@ -60,14 +63,22 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
     var expanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(initial.id) {
-        runCatching { Api.detail(initial.id) }.onSuccess { if (it.title.isNotBlank()) detail = it }
-        if (initial.isSeries) {
-            runCatching { Api.seasons(initial.id) }.onSuccess { list ->
+    suspend fun load(id: String) {
+        runCatching { Api.detail(id) }.onSuccess { if (it.title.isNotBlank()) detail = it }
+        if (detail.isSeries) {
+            runCatching { Api.seasons(id) }.onSuccess { list ->
                 seasons = list
-                if (list.isNotEmpty()) selSe = list.first().se
+                if (list.none { it.se == selSe }) selSe = list.firstOrNull()?.se ?: 1
+                selEp = 1
             }
+        } else {
+            seasons = emptyList()
         }
+    }
+
+    LaunchedEffect(initial.id) {
+        runCatching { Api.dubs(initial.id) }.onSuccess { dubs = it }
+        load(initial.id)
     }
 
     fun resolve(se: Int, ep: Int, forceRes: Int? = null) {
@@ -75,7 +86,7 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
         busy = true
         status = "Resolving stream…"
         scope.launch {
-            val list = runCatching { Api.resources(detail.id, se, ep) }.getOrDefault(emptyList())
+            val list = runCatching { Api.resources(activeId, se, ep) }.getOrDefault(emptyList())
             if (list.isEmpty()) {
                 status = "No stream available for this episode."
                 busy = false
@@ -88,7 +99,7 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
                 return@launch
             }
             val picked = list.firstOrNull { it.resolution == forceRes } ?: list.first()
-            val url = runCatching { Api.sniff(picked.sourceUrl, detail.id) }.getOrNull()
+            val url = runCatching { Api.sniff(picked.sourceUrl, activeId) }.getOrNull()
             busy = false
             status = null
             if (url != null) onPlay(url, "${detail.title} · ${picked.resolution}p") else status = "Stream resolve failed, try another quality."
@@ -162,6 +173,41 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.clickable { expanded = !expanded },
                 )
+            }
+
+            if (dubs.size > 1) {
+                Spacer(Modifier.height(14.dp))
+                Text("Audio", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(dubs.size) { i ->
+                        val d = dubs[i]
+                        val on = d.id == activeId
+                        Box(
+                            Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(if (on) Accent else Surface2)
+                                .clickable(enabled = !busy && !on) {
+                                    scope.launch {
+                                        busy = true
+                                        status = "Loading ${langLabel(d)} audio…"
+                                        activeId = d.id
+                                        load(d.id)
+                                        status = null
+                                        busy = false
+                                    }
+                                }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                        ) {
+                            Text(
+                                text = langLabel(d),
+                                color = Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(Modifier.height(16.dp))
@@ -273,6 +319,35 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
                 TextButton(onClick = { picker = null }) { Text("Cancel", color = TextDim) }
             },
         )
+    }
+}
+
+private fun langLabel(d: Dub): String {
+    if (d.original || d.name.startsWith("Original")) return "Original"
+    return when (d.code.lowercase()) {
+        "en" -> "English"
+        "hi" -> "Hindi"
+        "bn" -> "বাংলা"
+        "te" -> "Telugu"
+        "ta" -> "Tamil"
+        "ml" -> "Malayalam"
+        "kn" -> "Kannada"
+        "mr" -> "Marathi"
+        "gu" -> "Gujarati"
+        "pa" -> "Punjabi"
+        "ur" -> "Urdu"
+        "es" -> "Español"
+        "esla" -> "Español (LatAm)"
+        "pt" -> "Português"
+        "ptbr" -> "Português (BR)"
+        "id" -> "Indonesia"
+        "th" -> "ไทย"
+        "vi" -> "Tiếng Việt"
+        "ar" -> "العربية"
+        "ko" -> "한국어"
+        "ja" -> "日本語"
+        "zh" -> "中文"
+        else -> d.name.removeSuffix(" dub").ifBlank { d.code.uppercase() }
     }
 }
 

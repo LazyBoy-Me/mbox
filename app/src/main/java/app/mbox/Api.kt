@@ -239,6 +239,23 @@ object Api {
         }
     }
 
+    /** Audio/dub tracks for a subject; each track is a separate subjectId with its own resources. */
+    suspend fun dubs(subjectId: String): List<Dub> = withContext(Dispatchers.IO) {
+        ensureToken()
+        val data = call("/subject-api/dub-info?host=api6.aoneroom.com&subjectId=$subjectId")
+        val arr = data.optJSONObject("data")?.optJSONArray("dubs") ?: return@withContext emptyList()
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val sid = o.optString("subjectId")
+            if (sid.isEmpty()) null else Dub(
+                id = sid,
+                name = o.optString("lanName"),
+                code = o.optString("lanCode"),
+                original = o.optBoolean("original"),
+            )
+        }
+    }
+
     suspend fun resources(subjectId: String, se: Int, ep: Int): List<StreamRes> =
         withContext(Dispatchers.IO) {
             val data = call("/subject-api/resource/v2?subjectId=$subjectId&se=$se&ep=$ep")
