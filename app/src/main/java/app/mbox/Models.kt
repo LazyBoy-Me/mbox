@@ -25,6 +25,27 @@ data class Dub(
 
 data class Season(val se: Int, val maxEp: Int)
 
+/** Everything the player needs; it resolves qualities/audio itself. */
+data class PlaySpec(
+    val baseId: String,        // original subject id (used to list audio tracks)
+    val title: String,
+    val series: Boolean = false,
+    val se: Int = 0,
+    val ep: Int = 0,
+    val dubId: String = "",    // audio subject id to start with ("" = original)
+)
+
+data class SniffInfo(
+    val url: String,
+    val name: String,
+    val duration: Int,
+    val size: Long,
+) {
+    /** Backend substitutes a short "Upgrade Guide" promo clip when it refuses to serve a title. */
+    val looksLikePlaceholder: Boolean
+        get() = name.equals("Upgrade Guide", ignoreCase = true) || duration in 1..60
+}
+
 data class StreamRes(
     val resolution: Int,
     val codec: String,

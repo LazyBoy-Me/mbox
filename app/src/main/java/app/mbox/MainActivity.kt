@@ -56,7 +56,7 @@ class MainActivity : ComponentActivity() {
 private fun App() {
     var tab by remember { mutableStateOf(0) }
     var detail by remember { mutableStateOf<Subject?>(null) }
-    var playback by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var playback by remember { mutableStateOf<PlaySpec?>(null) }
 
     LaunchedEffect(Unit) { Api.ensureToken() }
 
@@ -66,17 +66,22 @@ private fun App() {
     val currentPlayback = playback
     val currentDetail = detail
 
+    // Movies start playing straight from the poster; series still need an episode picker.
+    fun open(s: Subject) {
+        if (s.isSeries) detail = s
+        else playback = PlaySpec(baseId = s.id, title = s.title)
+    }
+
     when {
         currentPlayback != null -> PlayerScreen(
-            url = currentPlayback.first,
-            title = currentPlayback.second,
+            spec = currentPlayback,
             onBack = { playback = null },
         )
 
         currentDetail != null -> DetailScreen(
             initial = currentDetail,
             onBack = { detail = null },
-            onPlay = { url, title -> playback = url to title },
+            onPlay = { playback = it },
         )
 
         else -> Scaffold(
@@ -85,8 +90,8 @@ private fun App() {
         ) { padding ->
             Box(Modifier.fillMaxSize().background(Bg).padding(padding)) {
                 when (tab) {
-                    0 -> HomeScreen(onOpen = { detail = it }, onSearch = { tab = 1 })
-                    1 -> SearchScreen(onOpen = { detail = it })
+                    0 -> HomeScreen(onOpen = { open(it) }, onSearch = { tab = 1 })
+                    1 -> SearchScreen(onOpen = { open(it) })
                     2 -> Placeholder("Downloads", "Downloads will show up here.")
                     else -> Placeholder("Me", "Signed in as guest.\nNo account needed for playback.")
                 }

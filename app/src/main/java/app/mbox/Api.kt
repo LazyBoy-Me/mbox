@@ -320,11 +320,47 @@ object Api {
             out.sortedWith(compareByDescending<StreamRes> { it.resolution }.thenBy { it.codec })
         }
 
-    suspend fun sniff(sourceUrl: String, subjectId: String): String? = withContext(Dispatchers.IO) {
-        val encoded = URLEncoder.encode(sourceUrl, "UTF-8")
-        val data = call("/sniff/config?host=api6.aoneroom.com&linkUrl=$encoded&subjectId=$subjectId")
-        data.optJSONObject("data")?.optString("downloadUrl")?.takeIf { it.isNotEmpty() }
+    suspend fun sniff(sourceUrl: String, subjectId: String): String? =
+        sniffInfo(sourceUrl, subjectId)?.url
+
+    /** sniff/config returns the real signed CDN url plus the clip's own metadata. */
+    suspend fun sniffInfo(sourceUrl: String, subjectId: String): SniffInfo? =
+        withContext(Dispatchers.IO) {
+            val encoded = URLEncoder.encode(sourceUrl, "UTF-8")
+            val data = call("/sniff/config?host=api6.aoneroom.com&linkUrl=$encoded&subjectId=$subjectId")
+            val d = data.optJSONObject("data") ?: return@withContext null
+            val url = d.optString("downloadUrl").takeIf { it.isNotEmpty() } ?: return@withContext null
+            val res = d.optJSONObject("resource")
+            SniffInfo(
+                url = url,
+                name = d.optString("name"),
+                duration = res?.optInt("duration", 0) ?: 0,
+                size = res?.optString("size")?.toLongOrNull() ?: 0L,
+            )
+        }
+
+    /** Total size of a media file via a 1-byte range request; null when the server won't say. */
+    suspend fun probeSize(url: String): Long? = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url(url)
+            .header("User-Agent", PLAYER_UA)
+            .header("Range", "bytes=0-0")
+            .build()
+        runCatching {
+            client.newCall(req).execute().use { resp ->
+                val range = resp.header("Content-Range")
+                val total = range?.substringAfterLast('/')?.toLongOrNull()
+                when {
+                    total != null && total > 0 -> total
+                    resp.isSuccessful || resp.code == 206 -> resp.body?.contentLength()?.takeIf { it > 0 }
+                    else -> null
+                }
+            }
+        }.getOrNull()
     }
+
+    /** Anything under this is the placeholder/promo clip, never a real movie or episode. */
+    const val MIN_REAL_BYTES = 5_000_000L
 
     /** resources -> sniff for the requested resolution (falls back to the best one). */
     suspend fun stream(subjectId: String, se: Int, ep: Int, resolution: Int? = null): Pair<String, StreamRes>? {

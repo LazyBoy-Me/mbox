@@ -5,13 +5,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -19,11 +17,9 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -44,13 +40,13 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import app.mbox.Api
 import app.mbox.Dub
+import app.mbox.PlaySpec
 import app.mbox.Season
-import app.mbox.StreamRes
 import app.mbox.Subject
 import kotlinx.coroutines.launch
 
 @Composable
-fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) -> Unit) {
+fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (PlaySpec) -> Unit) {
     var detail by remember { mutableStateOf(initial) }
     var seasons by remember { mutableStateOf<List<Season>>(emptyList()) }
     var dubs by remember { mutableStateOf<List<Dub>>(emptyList()) }
@@ -59,7 +55,6 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
     var selEp by remember { mutableStateOf(1) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    var picker by remember { mutableStateOf<List<StreamRes>?>(null) }
     var expanded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -69,7 +64,7 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
             runCatching { Api.seasons(id) }.onSuccess { list ->
                 seasons = list
                 if (list.none { it.se == selSe }) selSe = list.firstOrNull()?.se ?: 1
-                selEp = 1
+                if (selEp < 1) selEp = 1
             }
         } else {
             seasons = emptyList()
@@ -81,37 +76,18 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
         load(initial.id)
     }
 
-    fun resolve(se: Int, ep: Int, only: StreamRes? = null) {
+    fun play(se: Int, ep: Int) {
         if (busy) return
-        busy = true
-        status = "Resolving stream…"
-        scope.launch {
-            val list = if (only != null) listOf(only)
-            else runCatching { Api.resources(activeId, se, ep) }.getOrDefault(emptyList())
-            if (list.isEmpty()) {
-                status = "No stream available for this episode."
-                busy = false
-                return@launch
-            }
-            if (only == null && list.size > 1) {
-                picker = list
-                busy = false
-                status = null
-                return@launch
-            }
-            val picked = list.first()
-            val url = runCatching { Api.sniff(picked.sourceUrl, activeId) }.getOrNull()
-            busy = false
-            status = null
-            if (url != null) {
-                val lang = dubs.firstOrNull { it.id == activeId }?.let { langLabel(it) }
-                val tag = listOfNotNull(lang, "${picked.resolution}p ${codecLabel(picked.codec)}")
-                    .joinToString(" · ")
-                onPlay(url, "${detail.title} · $tag")
-            } else {
-                status = "Stream resolve failed, try another quality."
-            }
-        }
+        onPlay(
+            PlaySpec(
+                baseId = initial.id,
+                title = detail.title.ifBlank { initial.title },
+                series = detail.isSeries,
+                se = se,
+                ep = ep,
+                dubId = activeId,
+            )
+        )
     }
 
     Column(
@@ -220,13 +196,17 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
 
             Spacer(Modifier.height(16.dp))
             Button(
-                onClick = { resolve(if (detail.isSeries) selSe else 0, if (detail.isSeries) selEp else 0) },
+                onClick = { play(if (detail.isSeries) selSe else 0, if (detail.isSeries) selEp else 0) },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 shape = RoundedCornerShape(10.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.White),
             ) {
-                Text(if (busy) "Please wait…" else "▶  Play", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = if (detail.isSeries) "▶  Play S$selSe E$selEp" else "▶  Play",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
             }
             status?.let {
                 Spacer(Modifier.height(8.dp))
@@ -257,7 +237,7 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
                 }
 
                 Spacer(Modifier.height(16.dp))
-                Text("Episodes", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("Episodes · tap to play", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(8.dp))
                 val maxEp = seasons.firstOrNull { it.se == selSe }?.maxEp ?: 0
                 val rows = (1..maxEp).chunked(6)
@@ -273,7 +253,7 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
                                         .background(if (on) Accent else Surface2)
                                         .clickable {
                                             selEp = e
-                                            resolve(selSe, e)
+                                            play(selSe, e)
                                         },
                                     contentAlignment = Alignment.Center,
                                 ) {
@@ -292,83 +272,4 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
             Spacer(Modifier.height(30.dp))
         }
     }
-
-    picker?.let { list ->
-        AlertDialog(
-            onDismissRequest = { picker = null },
-            containerColor = Surface1,
-            title = { Text("Select quality", color = TextMain, fontSize = 17.sp) },
-            text = {
-                Column(Modifier.heightIn(max = 320.dp)) {
-                    list.forEach { r ->
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable {
-                                    picker = null
-                                    resolve(
-                                        if (detail.isSeries) selSe else 0,
-                                        if (detail.isSeries) selEp else 0,
-                                        r,
-                                    )
-                                }
-                                .padding(vertical = 12.dp, horizontal = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("${r.resolution}p  ${codecLabel(r.codec)}", color = TextMain, fontSize = 14.sp)
-                            Text(fmtSize(r.size), color = TextDim, fontSize = 12.sp)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { picker = null }) { Text("Cancel", color = TextDim) }
-            },
-        )
-    }
-}
-
-private fun langLabel(d: Dub): String {
-    if (d.original || d.name.startsWith("Original")) return "Original"
-    return when (d.code.lowercase()) {
-        "en" -> "English"
-        "hi" -> "Hindi"
-        "bn" -> "বাংলা"
-        "te" -> "Telugu"
-        "ta" -> "Tamil"
-        "ml" -> "Malayalam"
-        "kn" -> "Kannada"
-        "mr" -> "Marathi"
-        "gu" -> "Gujarati"
-        "pa" -> "Punjabi"
-        "ur" -> "Urdu"
-        "es" -> "Español"
-        "esla" -> "Español (LatAm)"
-        "pt" -> "Português"
-        "ptbr" -> "Português (BR)"
-        "id" -> "Indonesia"
-        "th" -> "ไทย"
-        "vi" -> "Tiếng Việt"
-        "ar" -> "العربية"
-        "ko" -> "한국어"
-        "ja" -> "日本語"
-        "zh" -> "中文"
-        else -> d.name.removeSuffix(" dub").ifBlank { d.code.uppercase() }
-    }
-}
-
-private fun codecLabel(codec: String): String = when (codec.lowercase()) {
-    "hevc", "h265", "hvc1" -> "HEVC"
-    "h264", "avc", "avc1" -> "H.264"
-    "av1" -> "AV1"
-    else -> codec.uppercase().ifBlank { "MP4" }
-}
-
-private fun fmtSize(bytes: Long): String = when {
-    bytes >= 1_000_000_000 -> String.format("%.2f GB", bytes / 1_000_000_000.0)
-    bytes >= 1_000_000 -> "${bytes / 1_000_000} MB"
-    bytes > 0 -> "${bytes / 1000} KB"
-    else -> ""
 }
