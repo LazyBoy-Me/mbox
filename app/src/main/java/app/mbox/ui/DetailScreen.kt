@@ -81,28 +81,33 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
         load(initial.id)
     }
 
-    fun resolve(se: Int, ep: Int, forceRes: Int? = null) {
+    fun resolve(se: Int, ep: Int, only: StreamRes? = null) {
         if (busy) return
         busy = true
         status = "Resolving stream…"
         scope.launch {
-            val list = runCatching { Api.resources(activeId, se, ep) }.getOrDefault(emptyList())
+            val list = if (only != null) listOf(only)
+            else runCatching { Api.resources(activeId, se, ep) }.getOrDefault(emptyList())
             if (list.isEmpty()) {
                 status = "No stream available for this episode."
                 busy = false
                 return@launch
             }
-            if (forceRes == null && list.size > 1) {
+            if (only == null && list.size > 1) {
                 picker = list
                 busy = false
                 status = null
                 return@launch
             }
-            val picked = list.firstOrNull { it.resolution == forceRes } ?: list.first()
+            val picked = list.first()
             val url = runCatching { Api.sniff(picked.sourceUrl, activeId) }.getOrNull()
             busy = false
             status = null
-            if (url != null) onPlay(url, "${detail.title} · ${picked.resolution}p") else status = "Stream resolve failed, try another quality."
+            if (url != null) {
+                onPlay(url, "${detail.title} · ${picked.resolution}p ${codecLabel(picked.codec)}")
+            } else {
+                status = "Stream resolve failed, try another quality."
+            }
         }
     }
 
@@ -302,14 +307,14 @@ fun DetailScreen(initial: Subject, onBack: () -> Unit, onPlay: (String, String) 
                                     resolve(
                                         if (detail.isSeries) selSe else 0,
                                         if (detail.isSeries) selEp else 0,
-                                        r.resolution,
+                                        r,
                                     )
                                 }
                                 .padding(vertical = 12.dp, horizontal = 6.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("${r.resolution}p  ${r.codec}", color = TextMain, fontSize = 14.sp)
+                            Text("${r.resolution}p  ${codecLabel(r.codec)}", color = TextMain, fontSize = 14.sp)
                             Text(fmtSize(r.size), color = TextDim, fontSize = 12.sp)
                         }
                     }
@@ -349,6 +354,13 @@ private fun langLabel(d: Dub): String {
         "zh" -> "中文"
         else -> d.name.removeSuffix(" dub").ifBlank { d.code.uppercase() }
     }
+}
+
+private fun codecLabel(codec: String): String = when (codec.lowercase()) {
+    "hevc", "h265", "hvc1" -> "HEVC"
+    "h264", "avc", "avc1" -> "H.264"
+    "av1" -> "AV1"
+    else -> codec.uppercase().ifBlank { "MP4" }
 }
 
 private fun fmtSize(bytes: Long): String = when {

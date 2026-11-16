@@ -5,6 +5,9 @@ import android.content.SharedPreferences
 import android.util.Base64
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -256,33 +259,65 @@ object Api {
         }
     }
 
+    private fun collectRes(
+        arr: org.json.JSONArray?,
+        ep: Int,
+        seen: MutableSet<String>,
+        out: MutableList<StreamRes>,
+    ) {
+        if (arr == null) return
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val itemEp = o.optInt("ep", 0)
+            if (ep != 0 && itemEp != 0 && itemEp != ep) continue
+            val res = o.optInt("resolution", 0)
+            val codec = o.optString("codecName")
+            if (res <= 0 || !seen.add("$res/$codec")) continue
+            val src = o.optString("sourceUrl")
+            if (src.isEmpty()) continue
+            out.add(
+                StreamRes(
+                    resolution = res,
+                    codec = codec,
+                    // resource/v2 reports size in KB; some payloads use bytes.
+                    size = (o.optString("size").toLongOrNull() ?: 0L)
+                        .let { if (it in 1..10_000_000L) it * 1000L else it },
+                    duration = o.optInt("duration", 0),
+                    name = src.substringAfterLast('/'),
+                    sourceUrl = src,
+                )
+            )
+        }
+    }
+
+    /**
+     * resource/v2 is paginated (20 per page) and ignores the `ep` query param, so a season has to be
+     * walked page by page to find every codec/resolution for the requested episode. Page 1 tells us
+     * the total count; the remaining pages are fetched in parallel.
+     */
     suspend fun resources(subjectId: String, se: Int, ep: Int): List<StreamRes> =
         withContext(Dispatchers.IO) {
-            val data = call("/subject-api/resource/v2?subjectId=$subjectId&se=$se&ep=$ep")
-            val arr = data.optJSONObject("data")?.optJSONArray("list") ?: return@withContext emptyList()
+            val base = "/subject-api/resource/v2?host=api6.aoneroom.com&subjectId=$subjectId" +
+                "&se=$se&ep=$ep&perPage=20"
             val out = ArrayList<StreamRes>()
-            val seen = HashSet<Int>()
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                val itemEp = o.optInt("ep", 0)
-                if (se != 0 && ep != 0 && itemEp != 0 && itemEp != ep) continue
-                val res = o.optInt("resolution", 0)
-                if (res <= 0 || !seen.add(res)) continue
-                val src = o.optString("sourceUrl")
-                if (src.isEmpty()) continue
-                out.add(
-                    StreamRes(
-                        resolution = res,
-                        codec = o.optString("codecName"),
-                        // resource/v2 reports size in KB; some payloads use bytes.
-                        size = (o.optString("size").toLongOrNull() ?: 0L).let { if (it in 1..10_000_000L) it * 1000L else it },
-                        duration = o.optInt("duration", 0),
-                        name = src.substringAfterLast('/'),
-                        sourceUrl = src,
-                    )
-                )
+            val seen = HashSet<String>()
+            val first = call("$base&page=1").optJSONObject("data")
+            collectRes(first?.optJSONArray("list"), ep, seen, out)
+            if (se != 0 && ep != 0) {
+                val total = first?.optJSONObject("pager")?.optInt("totalCount", 0) ?: 0
+                val pages = ((total + 19) / 20).coerceIn(1, 8)
+                if (pages > 1) {
+                    val rest = coroutineScope {
+                        (2..pages).map { p ->
+                            async {
+                                runCatching { call("$base&page=$p").optJSONObject("data") }.getOrNull()
+                            }
+                        }.awaitAll()
+                    }
+                    rest.forEach { collectRes(it?.optJSONArray("list"), ep, seen, out) }
+                }
             }
-            out.sortedWith(compareByDescending<StreamRes> { it.resolution })
+            out.sortedWith(compareByDescending<StreamRes> { it.resolution }.thenBy { it.codec })
         }
 
     suspend fun sniff(sourceUrl: String, subjectId: String): String? = withContext(Dispatchers.IO) {
