@@ -112,7 +112,7 @@ fun HomeScreen(
         }
         if (filteredMovies.isNotEmpty()) {
             item {
-                SectionTitle("Trending Movies", onAll = { onOpen(filteredMovies.first()) })
+                SectionTitle("Trending Movies")
             }
             item {
                 PosterGrid(filteredMovies, onOpen)

@@ -187,7 +187,7 @@ fun PlayerScreen(spec: PlaySpec, onBack: () -> Unit) {
         if (list.isNotEmpty()) dubs = list
     }
 
-    LaunchedEffect(activeDub, retryKey, localPlayback, spec.localPath) {
+    LaunchedEffect(activeDub, retryKey, localPlayback, spec.localPath, se, ep) {
         if (localPlayback) {
             status = "Opening download…"
             setLocal(spec.localPath)
