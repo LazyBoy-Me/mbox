@@ -257,8 +257,10 @@ fun DetailScreen(
                         ) {
                             activeDub = d.id
                             showAudioMenu = false
-                            if (detail.isSeries) load(activeDub) else
-                                scope.launch { runCatching { Api.detail(activeDub) } }
+                            scope.launch {
+                                if (detail.isSeries) load(activeDub)
+                                else runCatching { Api.detail(activeDub) }
+                            }
                         }
                     }
                 }

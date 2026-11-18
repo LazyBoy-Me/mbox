@@ -314,7 +314,18 @@ object Api {
             if (tabsArr != null) {
                 for (i in 0 until tabsArr.length()) {
                     val t = tabsArr.optJSONObject(i) ?: continue
-                    tabs.add(SearchTab(t.optString("tabId"), t.optString("name")))
+                    val subsArr = t.optJSONArray("subs")
+                    val subs = ArrayList<SearchTab>()
+                    if (subsArr != null) {
+                        for (k in 0 until subsArr.length()) {
+                            val st = subsArr.optJSONObject(k) ?: continue
+                            val stId = st.optString("tabId")
+                            if (stId.isNotEmpty() && stId != t.optString("tabId")) {
+                                subs.add(SearchTab(stId, st.optString("name")))
+                            }
+                        }
+                    }
+                    tabs.add(SearchTab(t.optString("tabId"), t.optString("name"), subs))
                 }
             }
             val groups = ArrayList<SearchGroup>()

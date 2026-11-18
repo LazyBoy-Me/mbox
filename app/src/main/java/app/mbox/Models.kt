@@ -64,8 +64,12 @@ data class StreamRes(
     val referer: String = "",
 )
 
-/** One search tab reported by `subject-api/search/v2`. */
-data class SearchTab(val id: String, val name: String)
+/** One search tab reported by `subject-api/search/v2` (may carry sub-tabs like Movie/TV). */
+data class SearchTab(
+    val id: String,
+    val name: String,
+    val subs: List<SearchTab> = emptyList(),
+)
 
 /** A result block: either a ranked subject list or a people/video strip. */
 data class SearchGroup(val title: String, val items: List<Subject>)

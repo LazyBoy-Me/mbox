@@ -181,8 +181,11 @@ fun SearchScreen(initialQuery: String = "", onOpen: (Subject) -> Unit, onBack: (
                 )
             }
         } else {
+            // Flatten "Movie/Series" into its Movie and TV sub-tabs, like the stock app.
+            val displayTabs = if (tabs.isEmpty()) listOf(SearchTab("All", "All"))
+            else tabs.flatMap { t -> if (t.subs.isEmpty()) listOf(t) else t.subs }
             TabStrip(
-                tabs = if (tabs.isEmpty()) listOf(SearchTab("All", "All")) else tabs,
+                tabs = displayTabs,
                 selected = tab,
                 onSelect = { tab = it },
             )
