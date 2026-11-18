@@ -5,13 +5,19 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
@@ -26,19 +32,25 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.mbox.ui.Accent
 import app.mbox.ui.Bg
 import app.mbox.ui.DetailScreen
+import app.mbox.ui.DownloadsScreen
 import app.mbox.ui.HomeScreen
 import app.mbox.ui.MBoxTheme
-import app.mbox.ui.MessageBox
 import app.mbox.ui.PlayerScreen
 import app.mbox.ui.SearchScreen
 import app.mbox.ui.Surface1
+import app.mbox.ui.Surface2
 import app.mbox.ui.TextDim
+import app.mbox.ui.TextMain
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,7 +78,7 @@ private fun App() {
     val currentPlayback = playback
     val currentDetail = detail
 
-    // Movies start playing straight from the poster; series still need an episode picker.
+    // Movies start playing straight from the poster; series open the episode picker.
     fun open(s: Subject) {
         if (s.isSeries) detail = s
         else playback = PlaySpec(baseId = s.id, title = s.title)
@@ -82,6 +94,7 @@ private fun App() {
             initial = currentDetail,
             onBack = { detail = null },
             onPlay = { playback = it },
+            onDownloads = { tab = 2 },
         )
 
         else -> Scaffold(
@@ -90,13 +103,83 @@ private fun App() {
         ) { padding ->
             Box(Modifier.fillMaxSize().background(Bg).padding(padding)) {
                 when (tab) {
-                    0 -> HomeScreen(onOpen = { open(it) }, onSearch = { tab = 1 })
-                    1 -> SearchScreen(onOpen = { open(it) })
-                    2 -> Placeholder("Downloads", "Downloads will show up here.")
-                    else -> Placeholder("Me", "Signed in as guest.\nNo account needed for playback.")
+                    0 -> HomeScreen(
+                        onOpen = { open(it) },
+                        onSearch = { tab = 1 },
+                        onDownloads = { tab = 2 },
+                    )
+                    1 -> SearchScreen(
+                        onOpen = { open(it) },
+                        onBack = { tab = 0 },
+                    )
+                    2 -> DownloadsScreen(
+                        onOpen = { playback = it },
+                    )
+                    else -> MeScreen(
+                        version = "1.2",
+                        onDownloads = { tab = 2 },
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun MeScreen(version: String, onDownloads: () -> Unit) {
+    Column(
+        Modifier.fillMaxSize().padding(horizontal = 18.dp),
+    ) {
+        Spacer(Modifier.height(28.dp))
+        Text("Me", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(16.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Surface1)
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(Surface2)
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+            ) {
+                Icon(Icons.Filled.Person, contentDescription = null, tint = TextDim)
+            }
+            Spacer(Modifier.padding(horizontal = 8.dp))
+            Column {
+                Text("Guest", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("No account needed · full quality", color = TextDim, fontSize = 11.sp)
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(Surface1)
+                .clickable(onClick = onDownloads)
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("⤓", color = Accent, fontSize = 18.sp)
+            Spacer(Modifier.padding(horizontal = 6.dp))
+            Text("Downloads", color = TextMain, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text("›", color = TextDim, fontSize = 16.sp)
+        }
+        Spacer(Modifier.height(14.dp))
+        Text("MBox $version · playback via web BFF", color = TextDim, fontSize = 11.sp)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Audio: original + all available dubs. Quality: auto by network, changeable in the player.",
+            color = TextDim,
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+        )
+        Spacer(Modifier.height(24.dp))
     }
 }
 
@@ -120,7 +203,7 @@ private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
         NavigationBarItem(
             selected = selected == 2,
             onClick = { onSelect(2) },
-            icon = { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Downloads") },
+            icon = { Text("⤓", fontSize = 18.sp, color = if (selected == 2) Accent else TextDim) },
             label = { Text("Downloads", fontSize = 11.sp) },
             colors = navColors(),
         )
@@ -138,20 +221,7 @@ private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
 private fun navColors() = NavigationBarItemDefaults.colors(
     selectedIconColor = Accent,
     selectedTextColor = Accent,
-    indicatorColor = Surface1,
+    indicatorColor = Color(0x22E50914),
     unselectedIconColor = TextDim,
     unselectedTextColor = TextDim,
 )
-
-@Composable
-private fun Placeholder(title: String, subtitle: String) {
-    Column(Modifier.fillMaxSize()) {
-        Text(
-            text = title,
-            color = androidx.compose.ui.graphics.Color(0xFFF2F4F8),
-            fontSize = 22.sp,
-            modifier = Modifier.padding(start = 16.dp, top = 24.dp, bottom = 10.dp),
-        )
-        MessageBox(subtitle)
-    }
-}

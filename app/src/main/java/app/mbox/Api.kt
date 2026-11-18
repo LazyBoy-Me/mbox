@@ -191,6 +191,8 @@ object Api {
         duration = o.optString("duration"),
         genre = o.optString("genre"),
         rating = o.optString("imdbRatingValue"),
+        country = o.optString("countryName").let { if (it == "null") "" else it },
+        badge = o.optString("corner").let { if (it == "null") "" else it },
         desc = o.optString("description").let { if (it == "null") "" else it },
     )
 
@@ -228,17 +230,123 @@ object Api {
         listOfSubjects(data.optJSONObject("data")?.optJSONArray("items"))
     }
 
-    suspend fun search(keyword: String): List<Subject> = withContext(Dispatchers.IO) {
-        ensureToken()
-        val body = JSONObject()
-            .put("keyword", keyword)
-            .put("type", 0)
-            .put("page", 1)
-            .put("pageSize", 30)
-            .toString()
-        val data = call("/subject-api/search", "POST", body)
-        listOfSubjects(data.optJSONObject("data")?.optJSONArray("items"))
+    /** Plain search (kept for quick callers); always relevance-ranked. */
+    suspend fun search(keyword: String): List<Subject> {
+        val page = searchV2(keyword, "MovieTV").takeIf { it.subjects.isNotEmpty() }
+            ?: searchV2(keyword, "All")
+        if (page.subjects.isNotEmpty()) return rank(page.subjects, keyword)
+        return withContext(Dispatchers.IO) {
+            ensureToken()
+            val body = JSONObject()
+                .put("keyword", keyword)
+                .put("type", 0)
+                .put("page", 1)
+                .put("pageSize", 30)
+                .toString()
+            val data = runCatching { call("/subject-api/search", "POST", body) }.getOrNull()
+                ?: return@withContext emptyList()
+            rank(listOfSubjects(data.optJSONObject("data")?.optJSONArray("items")), keyword)
+        }
     }
+
+    // ---------------------------------------------------------------- search
+
+    /** Lower is not better: higher score wins. Bracket tags like "[Hindi]" are ignored. */
+    private fun relevance(title: String, query: String): Int {
+        fun norm(v: String) = v.lowercase()
+            .replace(Regex("\\[[^\\]]*\\]"), " ")
+            .replace(Regex("\\([^)]*\\)"), " ")
+            .replace(Regex("[^a-z0-9\u0980-\u09FF ]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        val t = norm(title)
+        val q = norm(query)
+        if (t.isEmpty() || q.isEmpty()) return 0
+        val tParts = t.split(' ')
+        val qParts = q.split(' ').filter { it.isNotEmpty() }
+        if (qParts.isEmpty()) return 0
+        var hits = 0
+        for (part in qParts) {
+            if (tParts.any { it == part }) hits += 2
+            else if (tParts.any { it.startsWith(part) }) hits += 1
+        }
+        return when {
+            t == q -> 1000
+            t.startsWith(q) -> 700
+            t.contains(q) -> 500
+            hits == 0 -> 0
+            else -> 100 + hits * 25 + qParts.count { t.contains(it) } * 10
+        }
+    }
+
+    /** Ranks a result list against the query and drops blocks with no textual match at all. */
+    private fun rank(list: List<Subject>, query: String): List<Subject> {
+        val scored = list.map { it to relevance(it.title, query) }
+        val any = scored.any { it.second > 0 }
+        val kept = if (any) scored.filter { it.second > 0 } else scored
+        return kept
+            .sortedWith(
+                compareByDescending<Pair<Subject, Int>> { it.second }
+                    .thenByDescending { it.first.rating.toDoubleOrNull() ?: 0.0 }
+                    .thenByDescending { it.first.year.toIntOrNull() ?: 0 }
+            )
+            .map { it.first }
+    }
+
+    /** Search with the app's own tabs (All / Movie / TV / Music / People) and grouped results. */
+    suspend fun searchV2(keyword: String, tabId: String = "All"): SearchPage =
+        withContext(Dispatchers.IO) {
+            ensureToken()
+            val body = JSONObject()
+                .put("keyword", keyword)
+                .put("page", 1)
+                .put("pageSize", 30)
+                .put("type", 0)
+                .put("tabId", tabId)
+                .toString()
+            val data = runCatching { call("/subject-api/search/v2", "POST", body) }
+                .getOrElse { return@withContext SearchPage() }
+            val payload = data.optJSONObject("data") ?: return@withContext SearchPage()
+
+            val tabsArr = payload.optJSONArray("tabs")
+            val tabs = ArrayList<SearchTab>()
+            if (tabsArr != null) {
+                for (i in 0 until tabsArr.length()) {
+                    val t = tabsArr.optJSONObject(i) ?: continue
+                    tabs.add(SearchTab(t.optString("tabId"), t.optString("name")))
+                }
+            }
+            val groups = ArrayList<SearchGroup>()
+            val results = payload.optJSONArray("results")
+            if (results != null) {
+                for (i in 0 until results.length()) {
+                    val g = results.optJSONObject(i) ?: continue
+                    val raw = ArrayList<Subject>()
+                    val subjArr = g.optJSONArray("subjects")
+                    if (subjArr != null) {
+                        for (j in 0 until subjArr.length()) {
+                            val o = subjArr.optJSONObject(j) ?: continue
+                            val s = o.optJSONObject("subject") ?: o
+                            if (s.optString("subjectId").isNotEmpty()) raw.add(subjectOf(s))
+                        }
+                    }
+                    if (raw.isEmpty()) continue
+                    // Only full titles are meaningful for the Movie/Series tabs.
+                    val filtered = when (tabId) {
+                        "Movie" -> raw.filter { it.type == 1 }
+                        "TV" -> raw.filter { it.type == 2 }
+                        else -> raw
+                    }
+                    if (filtered.isEmpty()) continue
+                    val ordered = if (tabId == "All" || tabId == "MovieTV" || tabId == "Movie" || tabId == "TV") {
+                        rank(filtered, keyword)
+                    } else filtered
+                    groups.add(SearchGroup(g.optString("title"), ordered))
+                }
+            }
+            SearchPage(tabs, groups)
+        }
 
     suspend fun detail(subjectId: String): Subject = withContext(Dispatchers.IO) {
         ensureToken()

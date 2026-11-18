@@ -9,6 +9,8 @@ data class Subject(
     val duration: String = "",
     val genre: String = "",
     val rating: String = "",
+    val country: String = "",
+    val badge: String = "",     // "Hindi", "CAM", ...
     val desc: String = "",
 ) {
     val isSeries: Boolean get() = type == 2
@@ -33,6 +35,9 @@ data class PlaySpec(
     val se: Int = 0,
     val ep: Int = 0,
     val dubId: String = "",    // audio subject id to start with ("" = original)
+    val maxEp: Int = 0,        // last episode of the current season (for "next episode")
+    /** Play a downloaded file straight from disk instead of the network. */
+    val localPath: String = "",
 )
 
 data class SniffInfo(
@@ -58,3 +63,16 @@ data class StreamRes(
     /** Referer the CDN requires (`https://movie-box.co/movies/<slug>`). */
     val referer: String = "",
 )
+
+/** One search tab reported by `subject-api/search/v2`. */
+data class SearchTab(val id: String, val name: String)
+
+/** A result block: either a ranked subject list or a people/video strip. */
+data class SearchGroup(val title: String, val items: List<Subject>)
+
+data class SearchPage(
+    val tabs: List<SearchTab> = emptyList(),
+    val groups: List<SearchGroup> = emptyList(),
+) {
+    val subjects: List<Subject> get() = groups.flatMap { it.items }
+}
