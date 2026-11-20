@@ -142,6 +142,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
     var showInfo by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var showSeasonMenu by remember { mutableStateOf(false) }
+    var person by remember { mutableStateOf<Staff?>(null) }
 
     // ------------------------------------------------------------------ playback
     var streams by remember { mutableStateOf<List<StreamRes>>(emptyList()) }
@@ -172,6 +173,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
     var previewMs by remember { mutableStateOf(0L) }
     var startPos by remember { mutableStateOf(0L) }
     var gestureHint by remember { mutableStateOf<String?>(null) }
+    var boosting by remember { mutableStateOf(false) }
 
     // next-episode countdown
     var nextIn by remember { mutableStateOf(0) }
@@ -441,6 +443,19 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
         streams.firstOrNull { it === current }?.let { setSource(it, pos) }
     }
 
+    fun onWifi(): Boolean {
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val caps = cm?.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
+
+    fun wifiBlocked(): Boolean {
+        if (!Store.wifiOnlyDownloads || onWifi()) return false
+        toast = "Wi-Fi only is on · turn it off in Me → Playback"
+        return true
+    }
+
     fun loadQualities(targetEp: Int) {
         sheetEp = if (targetEp <= 0) 1 else targetEp
         sheetTitle = if (spec.series) "S$se E$sheetEp" else "Movie"
@@ -497,9 +512,27 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
             Box(
                 Modifier.fillMaxSize().pointerInput(locked) {
                     detectTapGestures(
+                        onPress = {
+                            if (locked) return@detectTapGestures
+                            tryAwaitRelease()
+                            // long-press boost ends on finger up
+                            if (boosting) {
+                                boosting = false
+                                player.setPlaybackSpeed(speed)
+                                gestureHint = null
+                            }
+                        },
+                        onLongPress = {
+                            if (locked) return@detectTapGestures
+                            boosting = true
+                            player.setPlaybackSpeed(2f)
+                            gestureHint = "2x speed"
+                        },
                         onTap = {
                             if (locked) return@detectTapGestures
-                            if (menu != 0) menu = 0 else controlsVisible = !controlsVisible
+                            if (boosting) {
+                                // release already handled the speed reset
+                            } else if (menu != 0) menu = 0 else controlsVisible = !controlsVisible
                         },
                         onDoubleTap = { off ->
                             if (locked) return@detectTapGestures
@@ -1183,7 +1216,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                     Spacer(Modifier.height(8.dp))
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         items(detail.staff.size) { i ->
-                            StaffCard(detail.staff[i])
+                            PersonCard(detail.staff[i]) { person = detail.staff[i] }
                         }
                     }
                 }
@@ -1227,6 +1260,18 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                 Spacer(Modifier.height(28.dp))
             }
         }
+    }
+
+    // ------------------------------------------------------------------ person sheet
+    person?.let { p ->
+        StaffSheet(
+            staff = p,
+            onDismiss = { person = null },
+            onOpen = { rec ->
+                player.pause()
+                onOpen(rec)
+            },
+        )
     }
 
     // ------------------------------------------------------------------ info sheet
@@ -1282,6 +1327,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(6.dp))
                             .clickable {
+                                if (wifiBlocked()) return@clickable
                                 Downloads.start(
                                     ctx,
                                     key = "${spec.baseId}-${if (spec.series) se else 0}-" +
@@ -1318,6 +1364,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                         color = AccentSoft,
                         fontSize = 11.sp,
                         modifier = Modifier.clickable {
+                            if (wifiBlocked()) return@clickable
                             val pick = sheet.firstOrNull()
                             if (pick != null) {
                                 scope.launch {
@@ -1369,40 +1416,6 @@ private fun InfoLine(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
         Text(label, color = TextMute, fontSize = 12.sp, modifier = Modifier.width(110.dp))
         Text(value, color = TextDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
-    }
-}
-
-@Composable
-private fun StaffCard(s: Staff) {
-    Column(Modifier.width(66.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        AsyncImage(
-            model = s.avatar,
-            contentDescription = s.name,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(54.dp)
-                .clip(CircleShape)
-                .background(Surface2),
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            s.name,
-            color = TextMain,
-            fontSize = 10.sp,
-            maxLines = 2,
-            textAlign = TextAlign.Center,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (s.character.isNotBlank()) {
-            Text(
-                s.character,
-                color = TextMute,
-                fontSize = 9.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center,
-            )
-        }
     }
 }
 
@@ -1524,15 +1537,19 @@ private fun MenuLine(text: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EpisodeChips(maxEp: Int, selected: Int, onSelect: (Int) -> Unit) {
     if (maxEp <= 0) return
-    FlowRow(
+    val state = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(selected, maxEp) {
+        if (selected > 0) state.animateScrollToItem((selected - 1).coerceIn(0, maxEp - 1))
+    }
+    androidx.compose.foundation.lazy.LazyRow(
+        state = state,
         horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalArrangement = Arrangement.spacedBy(5.dp),
+        contentPadding = PaddingValues(end = 4.dp),
     ) {
-        repeat(maxEp) { i ->
+        items(maxEp) { i ->
             val e = i + 1
             Box(
                 Modifier

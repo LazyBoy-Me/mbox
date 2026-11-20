@@ -109,7 +109,7 @@ private fun App() {
                 )
 
                 else -> MeScreen(
-                    version = "1.3",
+                    version = "1.4",
                     onDownloads = { tab = 2 },
                     onOpen = { open(it) },
                 )

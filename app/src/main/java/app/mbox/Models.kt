@@ -110,7 +110,11 @@ data class SearchTab(
 )
 
 /** A result block: either a ranked subject list or a people/video strip. */
-data class SearchGroup(val title: String, val items: List<Subject>)
+data class SearchGroup(
+    val title: String,
+    val items: List<Subject>,
+    val people: List<Staff> = emptyList(),
+)
 
 data class SearchPage(
     val tabs: List<SearchTab> = emptyList(),

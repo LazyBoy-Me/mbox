@@ -60,6 +60,7 @@ fun HomeScreen(
     var loaded by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(Store.history().take(10)) }
+    var showRank by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val hot = runCatching { Api.hotSections() }.getOrNull()
@@ -88,6 +89,11 @@ fun HomeScreen(
     val movies = remember(sections) {
         sections.firstOrNull { it.name.contains("Movie", true) }?.items
             ?: all.filter { it.type == 1 }
+    }
+
+    if (showRank) {
+        RankScreen(onBack = { showRank = false }, onOpen = onOpen)
+        return
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
@@ -156,7 +162,7 @@ fun HomeScreen(
                         }
                     }
                     if (movies.isNotEmpty()) {
-                        item { SectionHeader("Trending Now", "Rankings") }
+                        item { SectionHeader("Trending Now", "Rankings") { showRank = true } }
                         item { PosterGrid(movies.take(18), onOpen) }
                     }
                     sections.filter { it.name.contains("Movie", true).not() && it.items.isNotEmpty() }

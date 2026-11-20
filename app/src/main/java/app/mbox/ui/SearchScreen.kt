@@ -79,6 +79,7 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
     var fYear by remember { mutableStateOf("") }
     var fSort by remember { mutableStateOf("") }
     var browseItems by remember { mutableStateOf<List<Subject>>(emptyList()) }
+    var person by remember { mutableStateOf<app.mbox.Staff?>(null) }
 
     LaunchedEffect(Unit) {
         val rank = runCatching { Api.searchRank() }.getOrNull()
@@ -225,6 +226,7 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                 groups = groups,
                 onTab = { tab = it },
                 onOpen = onOpen,
+                onPerson = { person = it },
                 onFilter = { showFilter = true },
             )
 
@@ -249,6 +251,14 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                 },
             )
         }
+    }
+
+    person?.let { p ->
+        StaffSheet(
+            staff = p,
+            onDismiss = { person = null },
+            onOpen = { onOpen(it) },
+        )
     }
 
     if (showFilter) {
@@ -346,6 +356,7 @@ private fun Results(
     groups: List<SearchGroup>,
     onTab: (String) -> Unit,
     onOpen: (Subject) -> Unit,
+    onPerson: (app.mbox.Staff) -> Unit,
     onFilter: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -387,8 +398,20 @@ private fun Results(
         }
         LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
             groups.forEach { group ->
-                if (group.title.isNotBlank() && groups.size > 1) {
+                if (group.title.isNotBlank() && groups.size > 1 && (group.items.isNotEmpty() || group.people.isNotEmpty())) {
                     item { SectionHeader(group.title) }
+                }
+                if (group.people.isNotEmpty()) {
+                    item {
+                        androidx.compose.foundation.lazy.LazyRow(
+                            contentPadding = PaddingValues(horizontal = 12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            items(group.people.size) { i ->
+                                PersonCard(group.people[i]) { onPerson(group.people[i]) }
+                            }
+                        }
+                    }
                 }
                 items(group.items.size) { i ->
                     ResultRow(group.items[i], if (selected == "All") i + 1 else 0) { onOpen(group.items[i]) }

@@ -375,7 +375,24 @@ object Api {
                             if (s.optString("subjectId").isNotEmpty()) raw.add(subjectOf(s))
                         }
                     }
-                    if (raw.isEmpty()) continue
+                    val people = ArrayList<Staff>()
+                    val staffArr = g.optJSONArray("staffs")
+                    if (staffArr != null) {
+                        for (k in 0 until staffArr.length()) {
+                            val so = staffArr.optJSONObject(k) ?: continue
+                            val nm = clean(so.optString("name"))
+                            if (nm.isEmpty()) continue
+                            people.add(
+                                Staff(
+                                    id = so.optString("staffId"),
+                                    name = nm,
+                                    character = clean(so.optString("character")),
+                                    avatar = clean(so.optString("avatarUrl")),
+                                )
+                            )
+                        }
+                    }
+                    if (raw.isEmpty() && people.isEmpty()) continue
                     // Only full titles are meaningful for the Movie/Series tabs.
                     val filtered = when (tabId) {
                         "Movie" -> raw.filter { it.type == 1 }
@@ -386,7 +403,7 @@ object Api {
                     val ordered = if (tabId == "All" || tabId == "MovieTV" || tabId == "Movie" || tabId == "TV") {
                         rank(filtered, keyword)
                     } else filtered
-                    groups.add(SearchGroup(g.optString("title"), ordered))
+                    groups.add(SearchGroup(g.optString("title"), ordered, people))
                 }
             }
             SearchPage(tabs, groups)
@@ -511,10 +528,59 @@ object Api {
             val data = runCatching {
                 call("/tab/ranking-list?host=api6.aoneroom.com&type=$boardId&page=$page&perPage=30")
             }.getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
-            val arr = data.optJSONArray("items") ?: data.optJSONArray("subjectList")
-                ?: return@withContext emptyList()
+            val arr = data.optJSONArray("subjects") ?: data.optJSONArray("items")
+                ?: data.optJSONArray("subjectList") ?: return@withContext emptyList()
             listOfSubjects(arr)
         }
+
+    /** Filmography of one person (`staff-subject-list`). */
+    suspend fun staffSubjects(staffId: String, page: Int = 1): List<Subject> =
+        withContext(Dispatchers.IO) {
+            ensureToken()
+            val data = runCatching {
+                call("/subject-api/staff-subject-list?host=api6.aoneroom.com&staffId=$staffId" +
+                    "&page=$page&pageSize=30")
+            }.getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
+            listOfSubjects(data.optJSONArray("items"))
+        }
+
+    /** People who worked with this person (`staff-related`). */
+    suspend fun staffRelated(staffId: String, page: Int = 1): List<Staff> =
+        withContext(Dispatchers.IO) {
+            ensureToken()
+            val data = runCatching {
+                call("/subject-api/staff-related?host=api6.aoneroom.com&staffId=$staffId" +
+                    "&page=$page&pageSize=20")
+            }.getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
+            val arr = data.optJSONArray("items") ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val name = clean(o.optString("name"))
+                if (name.isBlank()) null else Staff(
+                    id = o.optString("staffId"),
+                    name = name,
+                    character = clean(o.optString("character")),
+                    avatar = clean(o.optString("avatarUrl")),
+                )
+            }
+        }
+
+    /** Person headline from `staff-info`. */
+    suspend fun staffInfo(staffId: String): Staff = withContext(Dispatchers.IO) {
+        ensureToken()
+        val o = runCatching {
+            call("/subject-api/staff-info?host=api6.aoneroom.com&staffId=$staffId")
+        }.getOrNull()?.optJSONObject("data") ?: return@withContext Staff(id = staffId)
+        Staff(
+            id = staffId,
+            name = clean(o.optString("name")),
+            character = (o.optJSONArray("staffTypes")?.let { arr ->
+                (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.optString("name") }
+                    .filter { it.isNotBlank() }.joinToString(", ")
+            }).orEmpty(),
+            avatar = clean(o.optString("avatarUrl")),
+        )
+    }
 
     suspend fun detail(subjectId: String): Subject = withContext(Dispatchers.IO) {
         ensureToken()
