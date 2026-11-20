@@ -16,16 +16,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -39,12 +33,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.mbox.Api
 import app.mbox.HotSection
+import app.mbox.R
+import app.mbox.Store
 import app.mbox.Subject
 import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
@@ -56,21 +53,24 @@ fun HomeScreen(
     onDownloads: () -> Unit,
 ) {
     var sections by remember { mutableStateOf<List<HotSection>>(emptyList()) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var category by remember { mutableStateOf("All") }
     var genres by remember { mutableStateOf<List<String>>(emptyList()) }
+    var category by remember { mutableStateOf("All") }
     var genreItems by remember { mutableStateOf<List<Subject>>(emptyList()) }
     var genreLoading by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var history by remember { mutableStateOf(Store.history().take(10)) }
 
     LaunchedEffect(Unit) {
-        Api.ensureToken()
         val hot = runCatching { Api.hotSections() }.getOrNull()
         if (hot.isNullOrEmpty()) {
-            error = "Couldn't reach MovieBox. Pull again in a moment."
+            error = "Couldn't reach MovieBox. Pull the tab again in a moment."
         } else {
             sections = hot
         }
-        runCatching { Api.genres() }.getOrNull()?.let { if (it.isNotEmpty()) genres = it }
+        genres = runCatching { Api.filterOptions().genres }.getOrDefault(emptyList())
+        history = Store.history().take(10)
+        loaded = true
     }
 
     LaunchedEffect(category) {
@@ -79,252 +79,198 @@ fun HomeScreen(
             return@LaunchedEffect
         }
         genreLoading = true
-        genreItems = runCatching { Api.genreSubjects(category) }.getOrDefault(emptyList())
+        genreItems = runCatching { Api.filtered(subjectType = 0, genre = category) }
+            .getOrDefault(emptyList())
         genreLoading = false
     }
 
-    val movies = sections.firstOrNull { it.name.contains("Movie", true) }?.items.orEmpty()
-    val series = sections.firstOrNull { it.name.contains("Series", true) }?.items.orEmpty()
-    val shorts = sections.firstOrNull { it.name.contains("Short", true) }?.items.orEmpty()
-    val music = sections.firstOrNull { it.name.contains("Music", true) }?.items.orEmpty()
+    val all = remember(sections) { sections.flatMap { it.items }.distinctBy { it.id } }
+    val movies = remember(sections) {
+        sections.firstOrNull { it.name.contains("Movie", true) }?.items
+            ?: all.filter { it.type == 1 }
+    }
 
-    val tabs = if (genres.isEmpty()) listOf("All") else listOf("All") + genres
+    Column(Modifier.fillMaxSize().background(Bg)) {
+        TopBar(onSearch = onSearch, onDownloads = onDownloads)
+        GenreStrip(
+            items = listOf("All") + genres,
+            selected = category,
+            onSelect = { category = it },
+        )
 
-    LazyColumn(
-        state = rememberLazyListState(),
-        modifier = Modifier.fillMaxSize().background(Bg),
-        contentPadding = PaddingValues(bottom = 24.dp),
-    ) {
-        item {
-            HomeTopBar(onSearch = onSearch, onDownloads = onDownloads)
+        if (!loaded) {
+            LoadingBox()
+            return@Column
         }
-        item {
-            CategoryStrip(
-                categories = tabs,
-                selected = category,
-                onSelect = { category = it },
-            )
+        error?.let {
+            MessageBox(it)
+            return@Column
         }
-        if (category == "All") {
-            // The hero slider belongs to the "All" tab only; genre tabs show a plain grid.
-            if (movies.isNotEmpty()) {
-                item {
-                    HeroCarousel(movies.take(6), onOpen)
-                }
-            }
-            item {
-                TipBanner(onDownloads)
-            }
-            if (movies.isNotEmpty()) {
-                item {
-                    SectionTitle("Trending Movies")
-                }
-                item {
-                    PosterGrid(movies, onOpen)
-                }
-            }
-            if (series.isNotEmpty()) {
-                item { SectionTitle("Trending Series") }
-                item { PosterRow(series, onOpen) }
-            }
-            if (shorts.isNotEmpty()) {
-                item { SectionTitle("Short TV") }
-                item { PosterRow(shorts, onOpen) }
-            }
-            if (music.isNotEmpty()) {
-                item { SectionTitle("Music") }
-                item { PosterRow(music, onOpen) }
-            }
-        } else {
-            item {
-                SectionTitle(category)
-            }
-            item {
-                if (genreLoading) {
-                    Box(Modifier.fillMaxWidth().padding(30.dp), contentAlignment = Alignment.Center) {
-                        androidx.compose.material3.CircularProgressIndicator(
-                            color = Accent, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
-                        )
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+        ) {
+            when {
+                category != "All" -> {
+                    item { SectionHeader(category) }
+                    item {
+                        when {
+                            genreLoading -> Box(
+                                Modifier.fillMaxWidth().padding(40.dp),
+                                contentAlignment = Alignment.Center,
+                            ) { LoadingBox(Modifier.height(60.dp)) }
+
+                            genreItems.isEmpty() -> MessageBox("Nothing in $category right now.")
+                            else -> PosterGrid(genreItems, onOpen)
+                        }
                     }
-                } else if (genreItems.isEmpty()) {
-                    Box(Modifier.fillMaxWidth().padding(30.dp), contentAlignment = Alignment.Center) {
-                        Text("Nothing in $category right now.", color = TextDim, fontSize = 13.sp)
+                }
+
+                else -> {
+                    val hero = movies.ifEmpty { all }.take(6)
+                    if (hero.isNotEmpty()) {
+                        item { HeroPager(hero, onOpen) }
                     }
-                } else {
-                    PosterGrid(genreItems, onOpen)
+                    item { TipBanner(onDownloads) }
+                    if (history.isNotEmpty()) {
+                        item { SectionHeader("Continue Watching") }
+                        item {
+                            androidx.compose.foundation.lazy.LazyRow(
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                items(history.size) { i ->
+                                    HistoryCard(history[i]) { h ->
+                                        onOpen(
+                                            Subject(
+                                                id = h.id,
+                                                title = h.title,
+                                                type = h.type,
+                                                cover = h.cover,
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (movies.isNotEmpty()) {
+                        item { SectionHeader("Trending Now", "Rankings") }
+                        item { PosterGrid(movies.take(18), onOpen) }
+                    }
+                    sections.filter { it.name.contains("Movie", true).not() && it.items.isNotEmpty() }
+                        .take(6)
+                        .forEach { sec ->
+                            item { SectionHeader(sec.name) }
+                            item { HorizontalPosterRow(sec.items, onOpen) }
+                        }
+                    val series = all.filter { it.type == 2 }
+                    if (series.isNotEmpty()) {
+                        item { SectionHeader("Trending Series") }
+                        item { HorizontalPosterRow(series.distinctBy { it.id }.take(20), onOpen) }
+                    }
                 }
             }
         }
-        error?.let { msg ->
-            item {
-                Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
-                    Text(msg, color = TextDim, fontSize = 13.sp)
-                }
-            }
-        }
     }
 }
 
 @Composable
-private fun HomeTopBar(onSearch: () -> Unit, onDownloads: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Bg)
-            .padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            Modifier.size(36.dp).clip(CircleShape).background(Surface2),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(Icons.Filled.Person, contentDescription = "Profile", tint = TextDim, modifier = Modifier.size(20.dp))
-        }
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .height(42.dp)
-                .clip(RoundedCornerShape(10.dp))
-                .background(Surface1)
-                .clickable(onClick = onSearch)
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Filled.Search, contentDescription = "Search", tint = TextDim, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Search movies, series, anime…", color = TextDim, fontSize = 13.sp, maxLines = 1)
-        }
-        Box(
-            Modifier.size(36.dp).clip(RoundedCornerShape(9.dp)).background(Surface1).clickable(onClick = onDownloads),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text("⤓", color = Accent, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        }
-    }
-}
-
-@Composable
-private fun CategoryStrip(categories: List<String>, selected: String, onSelect: (String) -> Unit) {
-    LazyRow(
-        contentPadding = PaddingValues(horizontal = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(18.dp),
-        modifier = Modifier.fillMaxWidth().background(Bg).padding(bottom = 10.dp),
-    ) {
-        items(categories.size) { i ->
-            val name = categories[i]
-            val on = name == selected
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = name,
-                    color = if (on) TextMain else TextDim,
-                    fontSize = if (on) 16.sp else 15.sp,
-                    fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
-                    modifier = Modifier.clickable { onSelect(name) },
-                )
-                Spacer(Modifier.height(5.dp))
-                Box(
-                    Modifier
-                        .height(3.dp)
-                        .width(if (on) 20.dp else 0.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(if (on) Accent else Color.Transparent)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun HeroCarousel(items: List<Subject>, onOpen: (Subject) -> Unit) {
+private fun HeroPager(items: List<Subject>, onOpen: (Subject) -> Unit) {
     val pager = rememberPagerState(pageCount = { items.size })
     LaunchedEffect(pager) {
+        if (items.size < 2) return@LaunchedEffect
         while (true) {
-            delay(6000)
-            if (items.size > 1) {
-                val next = (pager.currentPage + 1) % items.size
-                pager.animateScrollToPage(next)
-            }
+            delay(5000)
+            val next = (pager.currentPage + 1) % items.size
+            pager.animateScrollToPage(next)
         }
     }
-    Column {
+    Box(Modifier.fillMaxWidth()) {
         HorizontalPager(
             state = pager,
-            contentPadding = PaddingValues(horizontal = 14.dp),
-            pageSpacing = 10.dp,
-        ) { index ->
-            val item = items[index]
+            contentPadding = PaddingValues(horizontal = 12.dp),
+            pageSpacing = 8.dp,
+            modifier = Modifier.fillMaxWidth(),
+        ) { page ->
+            val s = items[page]
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .aspectRatio(16f / 10f)
-                    .clip(RoundedCornerShape(12.dp))
+                    .aspectRatio(1.78f)
+                    .clip(RoundedCornerShape(6.dp))
                     .background(Surface2)
-                    .clickable { onOpen(item) },
+                    .clickable { onOpen(s) },
             ) {
                 AsyncImage(
-                    model = item.cover,
-                    contentDescription = item.title,
+                    model = s.cover,
+                    contentDescription = s.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                 )
                 Box(
-                    Modifier.fillMaxSize().background(
-                        Brush.verticalGradient(
-                            0f to Color(0x00000000),
-                            0.55f to Color(0x66000000),
-                            1f to Color(0xF20B0D12),
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0x00000000), Color(0x33000000), Color(0xE6000000))
+                            )
                         )
-                    )
                 )
-                Column(
-                    Modifier.align(Alignment.BottomStart).padding(14.dp),
-                ) {
+                Column(Modifier.align(Alignment.BottomStart).padding(12.dp)) {
                     Text(
-                        text = item.title,
+                        s.title,
                         color = Color.White,
-                        fontSize = 19.sp,
+                        fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(3.dp))
                     Text(
-                        text = listOf(item.year, item.genre.substringBefore(","), item.country)
+                        listOf(s.year, s.genre.substringBefore(","), if (s.isSeries) "Series" else "Movie")
                             .filter { it.isNotBlank() }.joinToString("  ·  "),
-                        color = Color(0xFFCBD3E1),
-                        fontSize = 12.sp,
+                        color = TextDim,
+                        fontSize = 11.sp,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
-                    Spacer(Modifier.height(10.dp))
+                    Spacer(Modifier.height(8.dp))
                     Row(
+                        Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(Color.White)
+                            .clickable { onOpen(s) }
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(Accent)
-                            .clickable { onOpen(item) }
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
                     ) {
-                        Text("▶", color = Color.White, fontSize = 12.sp)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Play", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        androidx.compose.material3.Icon(
+                            painter = painterResource(R.drawable.ic_player_play),
+                            contentDescription = null,
+                            tint = Color.Black,
+                            modifier = Modifier.size(11.dp),
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text("Play", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
         }
-        Spacer(Modifier.height(8.dp))
         Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
+            Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 20.dp, bottom = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             repeat(items.size) { i ->
                 Box(
                     Modifier
-                        .padding(horizontal = 3.dp)
-                        .size(if (i == pager.currentPage) 7.dp else 5.dp)
+                        .size(if (i == pager.currentPage) 6.dp else 4.dp)
                         .clip(CircleShape)
-                        .background(if (i == pager.currentPage) Accent else Surface2)
+                        .background(
+                            if (i == pager.currentPage) AccentSoft
+                            else Color(0x66FFFFFF)
+                        ),
                 )
             }
         }
@@ -334,111 +280,68 @@ private fun HeroCarousel(items: List<Subject>, onOpen: (Subject) -> Unit) {
 @Composable
 private fun TipBanner(onDownloads: () -> Unit) {
     Row(
-        modifier = Modifier
+        Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(
-                Brush.horizontalGradient(listOf(Color(0xFF2B2113), Color(0xFF3A2C16)))
-            )
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color(0xFF17231C))
             .clickable(onClick = onDownloads)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 12.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier.size(34.dp).clip(CircleShape).background(Color(0x33FFC107)),
-            contentAlignment = Alignment.Center,
-        ) { Text("⤓", color = Color(0xFFFFC107), fontSize = 18.sp) }
-        Spacer(Modifier.width(12.dp))
+        androidx.compose.material3.Icon(
+            painter = painterResource(R.drawable.ic_movie_download),
+            contentDescription = null,
+            tint = AccentSoft,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(9.dp))
         Column(Modifier.weight(1f)) {
-            Text("Download and watch offline", color = Color(0xFFFFE0A3), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text("Any title, any quality · no ads", color = Color(0xFFB9A683), fontSize = 11.sp)
+            Text("Download and watch offline", color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text("Full quality · no account needed", color = TextMute, fontSize = 10.sp)
         }
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(18.dp))
-                .background(Color(0xFFFFE9B8))
-                .padding(horizontal = 14.dp, vertical = 7.dp),
-        ) { Text("Open", color = Color(0xFF2B2113), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+        Text("Open", color = AccentSoft, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     }
 }
 
 @Composable
-private fun SectionTitle(title: String, onAll: (() -> Unit)? = null) {
-    Row(
-        Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(title, color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-        if (onAll != null) {
-            Text("All ›", color = TextDim, fontSize = 12.sp, modifier = Modifier.clickable(onClick = onAll))
-        }
-    }
-}
-
-@Composable
-private fun PosterGrid(items: List<Subject>, onOpen: (Subject) -> Unit) {
-    Column(Modifier.padding(horizontal = 14.dp)) {
-        items.chunked(3).forEach { row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
-                row.forEach { item ->
-                    PosterTile(item, Modifier.weight(1f), onOpen)
-                }
-                repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PosterRow(items: List<Subject>, onOpen: (Subject) -> Unit) {
-    LazyRow(
-        contentPadding = PaddingValues(horizontal = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        items(items.size) { i -> PosterTile(items[i], Modifier.width(104.dp), onOpen) }
-    }
-}
-
-@Composable
-private fun PosterTile(item: Subject, modifier: Modifier = Modifier, onOpen: (Subject) -> Unit) {
-    Column(modifier.clickable { onOpen(item) }) {
+private fun HistoryCard(h: app.mbox.HistoryEntry, onClick: (app.mbox.HistoryEntry) -> Unit) {
+    Column(Modifier.width(104.dp).clickable { onClick(h) }) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(8.dp))
+                .aspectRatio(1.4f)
+                .clip(RoundedCornerShape(5.dp))
                 .background(Surface2),
         ) {
             AsyncImage(
-                model = item.cover,
-                contentDescription = item.title,
+                model = h.cover,
+                contentDescription = h.title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
             )
-            val badge = item.badge.ifBlank { if (item.title.contains("[Hindi]", true)) "Hindi" else "" }
-            if (badge.isNotBlank()) {
-                Text(
-                    text = badge,
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(4.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xCC000000))
-                        .padding(horizontal = 5.dp, vertical = 2.dp),
-                )
-            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(2.5.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(Color(0x66FFFFFF))
+            )
+            Box(
+                Modifier
+                    .fillMaxWidth(h.progress)
+                    .height(2.5.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(Accent)
+            )
         }
-        Spacer(Modifier.height(5.dp))
+        Spacer(Modifier.height(4.dp))
+        Text(h.title, color = TextMain, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(
-            text = item.title,
-            color = TextMain,
-            fontSize = 11.sp,
-            lineHeight = 14.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
+            if (h.type == 2) "S${h.se} E${h.ep}" else "Movie",
+            color = TextMute,
+            fontSize = 10.sp,
+            maxLines = 1,
         )
     }
 }

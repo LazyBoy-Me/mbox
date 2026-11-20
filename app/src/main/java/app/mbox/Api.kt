@@ -182,18 +182,51 @@ object Api {
 
     // ---------------------------------------------------------------- parsing
 
+    private fun clean(v: String?): String = if (v == null || v == "null") "" else v
+
+    private fun staffOf(arr: org.json.JSONArray?): List<Staff> {
+        if (arr == null) return emptyList()
+        val out = ArrayList<Staff>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val name = clean(o.optString("name"))
+            if (name.isEmpty()) continue
+            out.add(
+                Staff(
+                    id = o.optString("staffId"),
+                    name = name,
+                    character = clean(o.optString("character")),
+                    avatar = clean(o.optString("avatarUrl")),
+                )
+            )
+        }
+        return out
+    }
+
     private fun subjectOf(o: JSONObject): Subject = Subject(
         id = o.optString("subjectId"),
         title = o.optString("title"),
         type = o.optInt("subjectType", 1),
         cover = o.optJSONObject("cover")?.optString("url").orEmpty(),
         year = o.optString("releaseDate").take(4),
-        duration = o.optString("duration"),
-        genre = o.optString("genre"),
+        duration = clean(o.optString("duration")),
+        genre = clean(o.optString("genre")),
         rating = o.optString("imdbRatingValue"),
-        country = o.optString("countryName").let { if (it == "null") "" else it },
-        badge = o.optString("corner").let { if (it == "null") "" else it },
-        desc = o.optString("description").let { if (it == "null") "" else it },
+        country = clean(o.optString("countryName")),
+        badge = clean(o.optString("corner")),
+        desc = clean(o.optString("description")),
+        aka = clean(o.optString("aka")),
+        language = clean(o.optString("language")),
+        viewers = if (o.optString("viewers").isEmpty() || o.optString("viewers") == "null") "" else o.optString("viewers"),
+        contentRating = clean(o.optString("contentRating")),
+        wantCount = o.optInt("wantToSeeCount"),
+        seenCount = o.optInt("haveSeenCount"),
+        seasonCount = o.optInt("seNum"),
+        staff = staffOf(o.optJSONArray("staffList")),
+        subtitleLangs = clean(o.optString("subtitles")).split(",")
+            .map { it.trim() }.filter { it.isNotEmpty() },
+        trailer = o.optJSONObject("trailer")?.optJSONObject("VideoAddress")?.optString("url").orEmpty(),
+        still = o.optJSONObject("stills")?.optString("url").orEmpty(),
     )
 
     private fun listOfSubjects(arr: org.json.JSONArray?): List<Subject> {
@@ -359,6 +392,130 @@ object Api {
             SearchPage(tabs, groups)
         }
 
+    /** Subtitle tracks for one episode; the endpoint needs resource/post ids from resource/v2. */
+    suspend fun captionsFor(subjectId: String, se: Int, ep: Int): List<Caption> =
+        withContext(Dispatchers.IO) {
+            val res = runCatching { resources(subjectId, se, ep) }.getOrDefault(emptyList())
+            val hit = res.filter { it.resourceId.isNotEmpty() }.maxByOrNull { it.resolution }
+                ?: return@withContext emptyList()
+            if (hit.resourceId.isEmpty()) return@withContext emptyList()
+            val path = "/subject-api/get-ext-captions?host=api6.aoneroom.com&subjectId=$subjectId" +
+                "&se=$se&ep=$ep&resourceId=${hit.resourceId}&postId=${hit.postId}"
+            val data = runCatching { call(path) }.getOrNull()?.optJSONObject("data")
+                ?: return@withContext emptyList()
+            val arr = data.optJSONArray("extCaptions") ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val url = o.optString("url")
+                if (url.isEmpty()) null else Caption(
+                    id = o.optString("id"),
+                    lang = o.optString("lan"),
+                    name = clean(o.optString("lanName")),
+                    url = url,
+                )
+            }
+        }
+
+    /** Search landing data: hot boards + "everyone is searching" words. */
+    suspend fun searchRank(): SearchRank = withContext(Dispatchers.IO) {
+        ensureToken()
+        val data = runCatching {
+            call("/subject-api/search-rank/v2?host=api6.aoneroom.com")
+        }.getOrNull()?.optJSONObject("data") ?: return@withContext SearchRank()
+        val sections = ArrayList<HotSection>()
+        val hot = data.optJSONArray("hot")
+        if (hot != null) {
+            for (i in 0 until hot.length()) {
+                val sec = hot.optJSONObject(i) ?: continue
+                val items = listOfSubjects(sec.optJSONArray("items"))
+                if (items.isNotEmpty()) sections.add(HotSection(clean(sec.optString("name")), items))
+            }
+        }
+        val words = ArrayList<String>()
+        val everyone = data.optJSONArray("everyoneSearch")
+        if (everyone != null) {
+            for (i in 0 until everyone.length()) {
+                val o = everyone.optJSONObject(i) ?: continue
+                val w = clean(o.optString("word")).ifEmpty { clean(o.optString("name")) }
+                if (w.isNotEmpty()) words.add(w)
+            }
+        }
+        SearchRank(sections, words)
+    }
+
+    /** Genre/country/year/sort lists used by the filter sheet. */
+    suspend fun filterOptions(): FilterOptions = withContext(Dispatchers.IO) {
+        ensureToken()
+        val data = runCatching { call("/subject-api/filter-items?host=api6.aoneroom.com") }
+            .getOrNull()?.optJSONObject("data") ?: return@withContext FilterOptions()
+        val types = data.optJSONArray("typeList") ?: return@withContext FilterOptions()
+        var genres = emptyList<String>()
+        var countries = emptyList<String>()
+        var years = emptyList<String>()
+        var sorts = emptyList<String>()
+        for (i in 0 until types.length()) {
+            val items = types.optJSONObject(i)?.optJSONArray("items") ?: continue
+            for (j in 0 until items.length()) {
+                val f = items.optJSONObject(j) ?: continue
+                val vals = f.optJSONArray("filterVals") ?: continue
+                val list = (0 until vals.length()).map { vals.optString(it) }
+                    .filter { it.isNotEmpty() && it != "All" }
+                when (f.optString("filterType")) {
+                    "genre" -> genres = list
+                    "country" -> countries = list
+                    "year" -> years = list
+                    "sort" -> sorts = list
+                }
+            }
+        }
+        FilterOptions(genres, countries, years, sorts)
+    }
+
+    /** Browse with filters, straight from the web filter page (same one the site uses). */
+    suspend fun filtered(
+        subjectType: Int = 0,
+        genre: String = "",
+        country: String = "",
+        year: String = "",
+        sort: String = "",
+        page: Int = 1,
+    ): List<Subject> = withContext(Dispatchers.IO) {
+        val sb = StringBuilder("/filter?subjectType=$subjectType&page=$page&perPage=30")
+        if (genre.isNotEmpty()) sb.append("&genre=").append(URLEncoder.encode(genre, "UTF-8"))
+        if (country.isNotEmpty()) sb.append("&country=").append(URLEncoder.encode(country, "UTF-8"))
+        if (year.isNotEmpty()) sb.append("&year=").append(URLEncoder.encode(year, "UTF-8"))
+        if (sort.isNotEmpty()) sb.append("&sort=").append(URLEncoder.encode(sort, "UTF-8"))
+        val data = runCatching { h5Catalog(sb.toString()) }.getOrNull()?.optJSONObject("data")
+            ?: return@withContext emptyList()
+        val holder = data.optJSONObject("subjectList") ?: return@withContext emptyList()
+        listOfSubjects(holder.optJSONArray("items"))
+    }
+
+    /** Ranking boards ("TOP Movies", "Bollywood", …). */
+    suspend fun rankBoards(): List<RankBoard> = withContext(Dispatchers.IO) {
+        ensureToken()
+        val data = runCatching { call("/tab/ranking-list?host=api6.aoneroom.com") }
+            .getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
+        val arr = data.optJSONArray("categoryList") ?: return@withContext emptyList()
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val id = o.optString("type")
+            if (id.isEmpty()) null else RankBoard(id, clean(o.optString("name")))
+        }
+    }
+
+    /** Titles inside one ranking board. */
+    suspend fun rankSubjects(boardId: String, page: Int = 1): List<Subject> =
+        withContext(Dispatchers.IO) {
+            ensureToken()
+            val data = runCatching {
+                call("/tab/ranking-list?host=api6.aoneroom.com&type=$boardId&page=$page&perPage=30")
+            }.getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
+            val arr = data.optJSONArray("items") ?: data.optJSONArray("subjectList")
+                ?: return@withContext emptyList()
+            listOfSubjects(arr)
+        }
+
     suspend fun detail(subjectId: String): Subject = withContext(Dispatchers.IO) {
         ensureToken()
         val data = call("/subject-api/get?subjectId=$subjectId")
@@ -418,6 +575,8 @@ object Api {
                     duration = o.optInt("duration", 0),
                     name = src.substringAfterLast('/'),
                     sourceUrl = src,
+                    resourceId = o.optString("resourceId"),
+                    postId = o.optString("postId"),
                 )
             )
         }

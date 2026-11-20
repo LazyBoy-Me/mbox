@@ -25,6 +25,7 @@ object Downloads {
     private const val DONE = "done"
     private const val FAILED = "failed"
     private const val CANCELED = "canceled"
+    private const val PAUSED = "paused"
 
     data class Task(
         val id: String,
@@ -78,6 +79,7 @@ object Downloads {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = HashMap<String, Job>()
+    private val paused = HashSet<String>()
 
     private val _tasks = MutableStateFlow<List<Task>>(emptyList())
     val tasks: StateFlow<List<Task>> = _tasks.asStateFlow()
@@ -106,11 +108,11 @@ object Downloads {
         stream: StreamRes,
     ) {
         val existing = find(key)
-        if (existing != null) {
-            if (existing.running || existing.finished) return
-            // failed / canceled -> retry from scratch
-        }
+        if (existing != null && (existing.running || existing.finished)) return
         val file = File(folder(ctx), safeName("$title $subtitle") + ".mp4")
+        // A paused/failed task continues from the bytes already on disk.
+        val offset = if (existing != null && file.exists()) file.length() else 0L
+        paused.remove(key)
         val task = Task(
             id = key,
             title = title,
@@ -119,6 +121,7 @@ object Downloads {
             referer = stream.referer,
             path = file.absolutePath,
             total = stream.size,
+            done = offset,
             status = RUNNING,
         )
         _tasks.update { list -> list.filterNot { it.id == key } + task }
@@ -132,6 +135,7 @@ object Downloads {
                     .header("User-Agent", Api.WEB_UA)
                     .header("Referer", stream.referer)
                     .header("Accept", "*/*")
+                    .apply { if (offset > 0) header("Range", "bytes=$offset-") }
                     .build()
                 client.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful && resp.code != 206) {
@@ -142,12 +146,12 @@ object Downloads {
                         update(key) { it.copy(status = FAILED) }
                         return@launch
                     }
-                    val total = body.contentLength().takeIf { it > 0 } ?: stream.size
-                    update(key) { it.copy(total = total, done = 0L) }
+                    val total = body.contentLength().takeIf { it > 0 }?.plus(offset) ?: stream.size
+                    update(key) { it.copy(total = total, done = offset) }
                     body.byteStream().use { input ->
-                        file.outputStream().use { output ->
+                        java.io.FileOutputStream(file, offset > 0).use { output ->
                             val buf = ByteArray(128 * 1024)
-                            var done = 0L
+                            var done = offset
                             while (true) {
                                 val n = input.read(buf)
                                 if (n <= 0) break
@@ -167,7 +171,8 @@ object Downloads {
                 update(key) { it.copy(done = it.total, speed = 0L, status = DONE) }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) {
-                    update(key) { it.copy(status = CANCELED, speed = 0L) }
+                    val keep = paused.remove(key)
+                    update(key) { it.copy(status = if (keep) PAUSED else CANCELED, speed = 0L) }
                     throw e
                 }
                 update(key) { it.copy(status = FAILED, speed = 0L) }
@@ -175,6 +180,37 @@ object Downloads {
                 jobs.remove(key)
             }
         }
+    }
+
+    /** Continue a paused or failed transfer from the bytes already on disk. */
+    fun resume(ctx: Context, id: String) {
+        val t = find(id) ?: return
+        if (t.running || t.finished) return
+        start(
+            ctx,
+            key = t.id,
+            title = t.title,
+            subtitle = t.subtitle,
+            stream = StreamRes(
+                resolution = 0,
+                codec = "",
+                size = t.total,
+                duration = 0,
+                name = "",
+                sourceUrl = "",
+                url = t.url,
+                referer = t.referer,
+            ),
+        )
+    }
+
+    /** Stops the transfer but keeps the partial file so [start] can continue it. */
+    fun pause(key: String) {
+        val task = find(key) ?: return
+        if (task.finished) return
+        paused.add(key)
+        jobs[key]?.cancel()
+        update(key) { it.copy(status = PAUSED, speed = 0L) }
     }
 
     fun cancel(key: String) {

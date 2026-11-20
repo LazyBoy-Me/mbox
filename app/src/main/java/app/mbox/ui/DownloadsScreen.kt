@@ -60,7 +60,12 @@ fun DownloadsScreen(onOpen: (PlaySpec) -> Unit) {
         if (tasks.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("⤓", color = Surface2, fontSize = 56.sp)
+                    androidx.compose.material3.Icon(
+                        painter = androidx.compose.ui.res.painterResource(app.mbox.R.drawable.ic_movie_download),
+                        contentDescription = null,
+                        tint = Surface2,
+                        modifier = Modifier.size(56.dp),
+                    )
                     Spacer(Modifier.height(8.dp))
                     Text("Nothing downloaded yet", color = TextDim, fontSize = 14.sp)
                     Spacer(Modifier.height(4.dp))
@@ -107,14 +112,44 @@ fun DownloadsScreen(onOpen: (PlaySpec) -> Unit) {
                                 contentAlignment = Alignment.Center,
                             ) { Text("▶", color = Color.White, fontSize = 13.sp) }
                         } else {
-                            Text(
-                                if (t.running) "Cancel" else "Remove",
-                                color = TextDim,
-                                fontSize = 11.sp,
-                                modifier = Modifier.clickable {
-                                    if (t.running) Downloads.cancel(t.id) else Downloads.remove(ctx, t.id)
-                                },
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                when {
+                                    t.running -> {
+                                        Text(
+                                            "Pause",
+                                            color = Color(0xFF2FF58B),
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.clickable { Downloads.pause(t.id) }.padding(6.dp),
+                                        )
+                                        Text(
+                                            "Cancel",
+                                            color = TextDim,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.clickable { Downloads.cancel(t.id) }.padding(6.dp),
+                                        )
+                                    }
+                                    t.status == "paused" || t.status == "failed" || t.status == "canceled" -> {
+                                        Text(
+                                            if (t.status == "paused") "Resume" else "Retry",
+                                            color = Color(0xFF2FF58B),
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.clickable { Downloads.resume(ctx, t.id) }.padding(6.dp),
+                                        )
+                                        Text(
+                                            "Remove",
+                                            color = TextDim,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.clickable { Downloads.remove(ctx, t.id) }.padding(6.dp),
+                                        )
+                                    }
+                                    else -> Text(
+                                        "Remove",
+                                        color = TextDim,
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.clickable { Downloads.remove(ctx, t.id) }.padding(6.dp),
+                                    )
+                                }
+                            }
                         }
                     }
                     Spacer(Modifier.height(8.dp))
@@ -129,7 +164,8 @@ fun DownloadsScreen(onOpen: (PlaySpec) -> Unit) {
                         Text(
                             when {
                                 t.finished -> "Completed · ${fmtBytes(t.done)}"
-                                t.status == "failed" -> "Failed · tap Remove to retry"
+                                t.status == "failed" -> "Failed · tap Retry"
+                                t.status == "paused" -> "Paused · ${fmtBytes(t.done)} of ${fmtBytes(t.total)}"
                                 t.status == "canceled" -> "Canceled"
                                 else -> "${fmtBytes(t.done)} / ${fmtBytes(t.total)}"
                             },

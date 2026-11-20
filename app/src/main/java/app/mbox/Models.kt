@@ -12,8 +12,43 @@ data class Subject(
     val country: String = "",
     val badge: String = "",     // "Hindi", "CAM", ...
     val desc: String = "",
+    // extra metadata the detail endpoint returns
+    val aka: String = "",
+    val language: String = "",
+    val viewers: String = "",
+    val contentRating: String = "",
+    val wantCount: Int = 0,
+    val seenCount: Int = 0,
+    val seasonCount: Int = 0,
+    val staff: List<Staff> = emptyList(),
+    val subtitleLangs: List<String> = emptyList(),
+    val trailer: String = "",
+    val still: String = "",
 ) {
     val isSeries: Boolean get() = type == 2
+}
+
+data class Staff(
+    val id: String = "",
+    val name: String = "",
+    val character: String = "",   // "Director" / role name
+    val avatar: String = "",
+)
+
+/** A subtitle track (`subject-api/get-ext-captions`). */
+data class Caption(
+    val id: String = "",
+    val lang: String = "",
+    val name: String = "",
+    val url: String = "",
+) {
+    val mime: String
+        get() = when {
+            url.endsWith(".srt", true) -> "application/x-subrip"
+            url.endsWith(".vtt", true) -> "text/vtt"
+            url.endsWith(".ass", true) || url.endsWith(".ssa", true) -> "text/x-ssa"
+            else -> "application/x-subrip"
+        }
 }
 
 data class HotSection(val name: String, val items: List<Subject>)
@@ -62,6 +97,9 @@ data class StreamRes(
     val url: String = "",
     /** Referer the CDN requires (`https://movie-box.co/movies/<slug>`). */
     val referer: String = "",
+    /** resource/v2 identifiers, needed by the captions endpoint. */
+    val resourceId: String = "",
+    val postId: String = "",
 )
 
 /** One search tab reported by `subject-api/search/v2` (may carry sub-tabs like Movie/TV). */
@@ -79,4 +117,37 @@ data class SearchPage(
     val groups: List<SearchGroup> = emptyList(),
 ) {
     val subjects: List<Subject> get() = groups.flatMap { it.items }
+}
+
+/** What the search page shows before a query: hot sections + "everyone is searching" words. */
+data class SearchRank(
+    val sections: List<HotSection> = emptyList(),
+    val words: List<String> = emptyList(),
+)
+
+/** Filter sheet options from `subject-api/filter-items`. */
+data class FilterOptions(
+    val genres: List<String> = emptyList(),
+    val countries: List<String> = emptyList(),
+    val years: List<String> = emptyList(),
+    val sorts: List<String> = emptyList(),
+)
+
+/** A ranking board ("TOP Movies", "Bollywood", …) from `tab/ranking-list`. */
+data class RankBoard(val id: String, val name: String)
+
+/** One entry of the on-device watch history. */
+data class HistoryEntry(
+    val id: String,
+    val title: String,
+    val cover: String,
+    val type: Int,
+    val se: Int,
+    val ep: Int,
+    val position: Long,
+    val duration: Long,
+    val updated: Long,
+) {
+    val progress: Float
+        get() = if (duration <= 0) 0f else (position.toFloat() / duration).coerceIn(0f, 1f)
 }
