@@ -68,6 +68,8 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
     var groups by remember { mutableStateOf<List<SearchGroup>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var live by remember { mutableStateOf<List<String>>(emptyList()) }
+    var liveSubjects by remember { mutableStateOf<List<Subject>>(emptyList()) }
+    var browseAll by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(Store.searchHistory()) }
 
     // landing content
@@ -98,10 +100,13 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
         val q = query.trim()
         if (q.length < 2) {
             live = emptyList()
+            liveSubjects = emptyList()
             return@LaunchedEffect
         }
+        // Typing cancels the previous effect, so a stale answer can never overwrite a newer one.
         delay(250)
         live = runCatching { Api.suggestWords(q) }.getOrDefault(emptyList())
+        liveSubjects = runCatching { Api.search(q) }.getOrDefault(emptyList()).take(3)
     }
 
     LaunchedEffect(submitted, tab) {
@@ -134,6 +139,11 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
         // Enter on the keyboard (or tapping Search / a suggestion) closes the IME and drops focus.
         keyboard?.hide()
         focus.clearFocus()
+    }
+
+    if (browseAll) {
+        BrowseScreen(onBack = { browseAll = false }, onOpen = onOpen)
+        return
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
@@ -239,11 +249,24 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                 onFilter = { showFilter = true },
             )
 
-            live.isNotEmpty() && query.trim() != submitted.trim() -> LazyColumn {
-                items(live.size) { i ->
-                    SuggestionRow(live[i]) {
-                        query = live[i]
-                        submit(live[i])
+            (live.isNotEmpty() || liveSubjects.isNotEmpty()) &&
+                query.trim() != submitted.trim() -> LazyColumn {
+                if (liveSubjects.isNotEmpty()) {
+                    item { SectionHeader("Top results") }
+                    items(liveSubjects.size) { i ->
+                        ResultRow(liveSubjects[i], 1) {
+                            submit(liveSubjects[i].title)
+                            onOpen(liveSubjects[i])
+                        }
+                    }
+                }
+                if (live.isNotEmpty()) {
+                    item { SectionHeader("Suggestions") }
+                    items(live.size) { i ->
+                        SuggestionRow(live[i]) {
+                            query = live[i]
+                            submit(live[i])
+                        }
                     }
                 }
             }
@@ -254,6 +277,11 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                 sections = hotSections,
                 onWord = { submit(it) },
                 onOpen = onOpen,
+                onBrowse = {
+                    browseAll = true
+                    keyboard?.hide()
+                    focus.clearFocus()
+                },
                 onClearHistory = {
                     Store.clearSearchHistory()
                     history = emptyList()
@@ -298,9 +326,42 @@ private fun Landing(
     sections: List<HotSection>,
     onWord: (String) -> Unit,
     onOpen: (Subject) -> Unit,
+    onBrowse: () -> Unit,
     onClearHistory: () -> Unit,
 ) {
     LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
+        item {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onBrowse)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_home_tab_menu),
+                    contentDescription = null,
+                    tint = AccentSoft,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    "Browse all titles",
+                    color = TextMain,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                Text("Genre · Country · Year", color = TextMute, fontSize = 10.sp)
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    painter = painterResource(R.drawable.ic_arrow_right_white_small),
+                    contentDescription = null,
+                    tint = TextMute,
+                    modifier = Modifier.size(12.dp),
+                )
+            }
+        }
         if (history.isNotEmpty()) {
             item {
                 Row(
