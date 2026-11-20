@@ -114,9 +114,9 @@ fun MeScreen(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    StatCard("History", "${history.size}") { page = 1 }
-                    StatCard("My List", "${myList.size}") { page = 2 }
-                    StatCard("Downloads", "") { onDownloads() }
+                    StatCard("History", "${history.size}", Modifier.weight(1f)) { page = 1 }
+                    StatCard("My List", "${myList.size}", Modifier.weight(1f)) { page = 2 }
+                    StatCard("Downloads", "", Modifier.weight(1f)) { onDownloads() }
                 }
             }
 
@@ -211,10 +211,9 @@ private fun sizeText(bytes: Long): String = when {
 }
 
 @Composable
-private fun StatCard(label: String, value: String, onClick: () -> Unit) {
+private fun StatCard(label: String, value: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Column(
-        Modifier
-            .weight(1f)
+        modifier
             .clip(RoundedCornerShape(8.dp))
             .background(Surface1)
             .clickable(onClick = onClick)
