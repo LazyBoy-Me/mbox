@@ -58,6 +58,9 @@ fun HomeScreen(
     var sections by remember { mutableStateOf<List<HotSection>>(emptyList()) }
     var error by remember { mutableStateOf<String?>(null) }
     var category by remember { mutableStateOf("All") }
+    var genres by remember { mutableStateOf<List<String>>(emptyList()) }
+    var genreItems by remember { mutableStateOf<List<Subject>>(emptyList()) }
+    var genreLoading by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         Api.ensureToken()
@@ -67,6 +70,17 @@ fun HomeScreen(
         } else {
             sections = hot
         }
+        runCatching { Api.genres() }.getOrNull()?.let { if (it.isNotEmpty()) genres = it }
+    }
+
+    LaunchedEffect(category) {
+        if (category == "All") {
+            genreItems = emptyList()
+            return@LaunchedEffect
+        }
+        genreLoading = true
+        genreItems = runCatching { Api.genreSubjects(category) }.getOrDefault(emptyList())
+        genreLoading = false
     }
 
     val movies = sections.firstOrNull { it.name.contains("Movie", true) }?.items.orEmpty()
@@ -74,18 +88,7 @@ fun HomeScreen(
     val shorts = sections.firstOrNull { it.name.contains("Short", true) }?.items.orEmpty()
     val music = sections.firstOrNull { it.name.contains("Music", true) }?.items.orEmpty()
 
-    val genres = remember(movies) {
-        movies.flatMap { it.genre.split(",") }
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .groupingBy { it }.eachCount()
-            .entries.sortedByDescending { it.value }
-            .map { it.key }
-            .take(8)
-    }
-    val filteredMovies = remember(movies, category) {
-        if (category == "All") movies else movies.filter { it.genre.contains(category, true) }
-    }
+    val tabs = if (genres.isEmpty()) listOf("All") else listOf("All") + genres
 
     LazyColumn(
         state = rememberLazyListState(),
@@ -97,38 +100,60 @@ fun HomeScreen(
         }
         item {
             CategoryStrip(
-                categories = listOf("All") + genres,
+                categories = tabs,
                 selected = category,
                 onSelect = { category = it },
             )
         }
-        if (movies.isNotEmpty()) {
-            item {
-                HeroCarousel(movies.take(6), onOpen)
-            }
-        }
-        item {
-            TipBanner(onDownloads)
-        }
-        if (filteredMovies.isNotEmpty()) {
-            item {
-                SectionTitle("Trending Movies")
+        if (category == "All") {
+            // The hero slider belongs to the "All" tab only; genre tabs show a plain grid.
+            if (movies.isNotEmpty()) {
+                item {
+                    HeroCarousel(movies.take(6), onOpen)
+                }
             }
             item {
-                PosterGrid(filteredMovies, onOpen)
+                TipBanner(onDownloads)
             }
-        }
-        if (series.isNotEmpty()) {
-            item { SectionTitle("Trending Series") }
-            item { PosterRow(series, onOpen) }
-        }
-        if (shorts.isNotEmpty()) {
-            item { SectionTitle("Short TV") }
-            item { PosterRow(shorts, onOpen) }
-        }
-        if (music.isNotEmpty()) {
-            item { SectionTitle("Music") }
-            item { PosterRow(music, onOpen) }
+            if (movies.isNotEmpty()) {
+                item {
+                    SectionTitle("Trending Movies")
+                }
+                item {
+                    PosterGrid(movies, onOpen)
+                }
+            }
+            if (series.isNotEmpty()) {
+                item { SectionTitle("Trending Series") }
+                item { PosterRow(series, onOpen) }
+            }
+            if (shorts.isNotEmpty()) {
+                item { SectionTitle("Short TV") }
+                item { PosterRow(shorts, onOpen) }
+            }
+            if (music.isNotEmpty()) {
+                item { SectionTitle("Music") }
+                item { PosterRow(music, onOpen) }
+            }
+        } else {
+            item {
+                SectionTitle(category)
+            }
+            item {
+                if (genreLoading) {
+                    Box(Modifier.fillMaxWidth().padding(30.dp), contentAlignment = Alignment.Center) {
+                        androidx.compose.material3.CircularProgressIndicator(
+                            color = Accent, strokeWidth = 2.dp, modifier = Modifier.size(26.dp)
+                        )
+                    }
+                } else if (genreItems.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().padding(30.dp), contentAlignment = Alignment.Center) {
+                        Text("Nothing in $category right now.", color = TextDim, fontSize = 13.sp)
+                    }
+                } else {
+                    PosterGrid(genreItems, onOpen)
+                }
+            }
         }
         error?.let { msg ->
             item {

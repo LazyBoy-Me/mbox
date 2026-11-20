@@ -58,12 +58,24 @@ fun SearchScreen(initialQuery: String = "", onOpen: (Subject) -> Unit, onBack: (
     var tabs by remember { mutableStateOf<List<SearchTab>>(emptyList()) }
     var results by remember { mutableStateOf<List<Subject>>(emptyList()) }
     var suggestions by remember { mutableStateOf<List<String>>(emptyList()) }
+    var live by remember { mutableStateOf<List<String>>(emptyList()) }
     var loading by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val hot = runCatching { Api.hotSections() }.getOrDefault(emptyList())
         suggestions = hot.flatMap { it.items }.map { it.title }.distinct().take(10)
+    }
+
+    // search-as-you-type: two letters are enough for the suggestion endpoint
+    LaunchedEffect(query) {
+        val q = query.trim()
+        if (q.length < 2) {
+            live = emptyList()
+            return@LaunchedEffect
+        }
+        delay(280)
+        live = runCatching { Api.suggestWords(q) }.getOrDefault(emptyList())
     }
 
     LaunchedEffect(submitted, tab) {
@@ -140,7 +152,34 @@ fun SearchScreen(initialQuery: String = "", onOpen: (Subject) -> Unit, onBack: (
             )
         }
 
-        if (!searched) {
+        val showLive = live.isNotEmpty() && query.trim() != submitted.trim()
+        if (showLive) {
+            LazyColumn(contentPadding = PaddingValues(bottom = 20.dp)) {
+                items(live.size) { i ->
+                    val word = live[i]
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                query = word
+                                submitted = word
+                                live = emptyList()
+                            }
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.Search,
+                            contentDescription = null,
+                            tint = TextDim,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(word, color = TextMain, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        } else if (!searched) {
             // suggestions, like the stock app's "Everyone is searching"
             if (suggestions.isNotEmpty()) {
                 Text(

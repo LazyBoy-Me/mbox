@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,12 +42,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.mbox.ui.Accent
 import app.mbox.ui.Bg
-import app.mbox.ui.DetailScreen
 import app.mbox.ui.DownloadsScreen
 import app.mbox.ui.HomeScreen
 import app.mbox.ui.MBoxTheme
-import app.mbox.ui.PlayerScreen
 import app.mbox.ui.SearchScreen
+import app.mbox.ui.WatchScreen
 import app.mbox.ui.Surface1
 import app.mbox.ui.Surface2
 import app.mbox.ui.TextDim
@@ -67,35 +67,34 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun App() {
     var tab by remember { mutableStateOf(0) }
-    var detail by remember { mutableStateOf<Subject?>(null) }
     var playback by remember { mutableStateOf<PlaySpec?>(null) }
 
     LaunchedEffect(Unit) { Api.ensureToken() }
 
     BackHandler(enabled = playback != null) { playback = null }
-    BackHandler(enabled = playback == null && detail != null) { detail = null }
 
     val currentPlayback = playback
-    val currentDetail = detail
 
-    // Movies start playing straight from the poster; series open the episode picker.
+    // Every tap opens the one watch screen: video on top, then audio/season/episode lists.
+    // Movies are addressed as se=0&ep=0, series start at season 1 episode 1.
     fun open(s: Subject) {
-        if (s.isSeries) detail = s
-        else playback = PlaySpec(baseId = s.id, title = s.title)
+        playback = PlaySpec(
+            baseId = s.id,
+            title = s.title,
+            series = s.isSeries,
+            se = if (s.isSeries) 1 else 0,
+            ep = if (s.isSeries) 1 else 0,
+        )
     }
 
     when {
-        currentPlayback != null -> PlayerScreen(
-            spec = currentPlayback,
-            onBack = { playback = null },
-        )
-
-        currentDetail != null -> DetailScreen(
-            initial = currentDetail,
-            onBack = { detail = null },
-            onPlay = { playback = it },
-            onDownloads = { tab = 2 },
-        )
+        currentPlayback != null -> key(currentPlayback.baseId, currentPlayback.localPath) {
+            WatchScreen(
+                spec = currentPlayback,
+                onBack = { playback = null },
+                onOpen = { open(it) },
+            )
+        }
 
         else -> Scaffold(
             containerColor = Bg,

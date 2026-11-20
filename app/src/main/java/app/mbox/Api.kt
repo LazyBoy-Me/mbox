@@ -502,6 +502,102 @@ object Api {
         }
     }
 
+    // ---------------------------------------------------------------- catalog (web BFF)
+
+    /** Unsigned h5 catalog call. A plain site referer is enough for these endpoints. */
+    private fun h5Catalog(path: String, referer: String = "$WEB_ORIGIN/"): JSONObject {
+        val req = Request.Builder()
+            .url(H5_BASE + path)
+            .header("User-Agent", WEB_UA)
+            .header("Accept", "application/json")
+            .header("Origin", WEB_ORIGIN)
+            .header("Referer", referer)
+            .header("X-Source", "web")
+            .header("X-Vip-Restrict", "false")
+            .header("X-Client-Info", JSONObject().put("timezone", java.util.TimeZone.getDefault().id).toString())
+            .build()
+        return client.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            runCatching { JSONObject(text) }.getOrElse { JSONObject().put("raw", text) }
+        }
+    }
+
+    /** Genre chips exactly as the stock app shows them (Action, Adventure, …). */
+    suspend fun genres(): List<String> = withContext(Dispatchers.IO) {
+        ensureToken()
+        val data = runCatching { call("/subject-api/filter-items?host=api6.aoneroom.com") }
+            .getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
+        val types = data.optJSONArray("typeList") ?: return@withContext emptyList()
+        for (i in 0 until types.length()) {
+            val items = types.optJSONObject(i)?.optJSONArray("items") ?: continue
+            for (j in 0 until items.length()) {
+                val f = items.optJSONObject(j) ?: continue
+                if (f.optString("filterType") != "genre") continue
+                val vals = f.optJSONArray("filterVals") ?: continue
+                val out = ArrayList<String>()
+                for (k in 0 until vals.length()) {
+                    val v = vals.optString(k)
+                    if (v.isNotEmpty() && v != "All") out.add(v)
+                }
+                if (out.isNotEmpty()) return@withContext out
+            }
+        }
+        emptyList()
+    }
+
+    /** Titles for one genre chip, from the web filter endpoint. */
+    suspend fun genreSubjects(genre: String, page: Int = 1): List<Subject> =
+        withContext(Dispatchers.IO) {
+            val path = "/filter?subjectType=0&genre=" + URLEncoder.encode(genre, "UTF-8") +
+                "&page=$page&perPage=30"
+            val data = runCatching { h5Catalog(path) }.getOrNull()?.optJSONObject("data")
+                ?: return@withContext emptyList()
+            val holder = data.optJSONObject("subjectList") ?: return@withContext emptyList()
+            val arr = holder.optJSONArray("items") ?: return@withContext emptyList()
+            val out = ArrayList<Subject>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val sub = o.optJSONObject("subject") ?: o
+                if (sub.optString("subjectId").isNotEmpty()) out.add(subjectOf(sub))
+            }
+            out
+        }
+
+    /** "You may also like" strip under the player (h5 recommendation endpoint). */
+    suspend fun recommendations(subjectId: String): List<Subject> = withContext(Dispatchers.IO) {
+        val slug = runCatching { detailPath(subjectId) }.getOrNull().orEmpty()
+        val path = "/subject/detail-rec?subjectId=$subjectId" +
+            if (slug.isNotEmpty()) "&detailPath=" + URLEncoder.encode(slug, "UTF-8") else ""
+        val data = runCatching { h5Catalog(path) }.getOrNull()?.optJSONObject("data")
+            ?: return@withContext emptyList()
+        val arr = data.optJSONArray("items") ?: return@withContext emptyList()
+        val out = ArrayList<Subject>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val sub = o.optJSONObject("subject") ?: o
+            if (sub.optString("subjectId").isNotEmpty()) out.add(subjectOf(sub))
+        }
+        out
+    }
+
+    /** Live search-as-you-type suggestions (words), same endpoint the stock app uses. */
+    suspend fun suggestWords(keyword: String): List<String> = withContext(Dispatchers.IO) {
+        if (keyword.trim().length < 2) return@withContext emptyList()
+        ensureToken()
+        val q = URLEncoder.encode(keyword.trim(), "UTF-8")
+        val data = runCatching { call("/subject-api/search-suggest?host=api6.aoneroom.com&keyword=$q") }
+            .getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
+        val arr = data.optJSONArray("items") ?: return@withContext emptyList()
+        val out = ArrayList<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val w = o.optString("word")
+            if (w.isNotEmpty() && out.none { it.equals(w, true) }) out.add(w)
+            if (out.size >= 10) break
+        }
+        out
+    }
+
     /**
      * Playable streams for a movie or one episode, straight from the web BFF.
      *
