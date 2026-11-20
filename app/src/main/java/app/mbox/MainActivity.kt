@@ -1,5 +1,8 @@
 package app.mbox
 
+import android.content.Intent
+import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -45,24 +48,80 @@ import app.mbox.ui.TextMute
 import app.mbox.ui.WatchScreen
 
 class MainActivity : ComponentActivity() {
+
+    private val inPip = mutableStateOf(false)
+    private val deepLink = mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Api.init(applicationContext)
-        Store.init(applicationContext)
+        deepLink.value = subjectIdFrom(intent)
         setContent {
             MBoxTheme {
-                App()
+                App(
+                    inPip = inPip.value,
+                    deepLink = deepLink.value,
+                    onLinkUsed = { deepLink.value = null },
+                )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        subjectIdFrom(intent)?.let { deepLink.value = it }
+    }
+
+    /**
+     * API 26–30 have no auto-enter flag, so Home has to be caught here. From API 31 the player
+     * enables auto-enter itself through [Pip.params].
+     */
+    override fun onUserLeaveHint() {
+        if (Pip.active && !inPip.value &&
+            Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.R
+        ) {
+            runCatching { enterPictureInPictureMode(Pip.params(this, autoEnter = false)) }
+        }
+        super.onUserLeaveHint()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        inPip.value = isInPictureInPictureMode
+    }
+
+    /** mbox://subject/<id> — the link the player's Share button produces. */
+    private fun subjectIdFrom(intent: Intent?): String? {
+        val data = intent?.data ?: return null
+        if (!data.scheme.equals("mbox", true) || !data.host.equals("subject", true)) return null
+        return data.lastPathSegment?.takeIf { it.isNotBlank() }
     }
 }
 
 @Composable
-private fun App() {
+private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
     var tab by remember { mutableStateOf(0) }
     var playback by remember { mutableStateOf<PlaySpec?>(null) }
 
     LaunchedEffect(Unit) { Api.ensureToken() }
+
+    // A shared link opens the title straight away; the player fetches the rest of the metadata.
+    LaunchedEffect(deepLink) {
+        val id = deepLink ?: return@LaunchedEffect
+        val d = runCatching { Api.detail(id) }.getOrNull()
+        val series = d?.isSeries == true
+        playback = PlaySpec(
+            baseId = id,
+            title = d?.title.orEmpty(),
+            series = series,
+            se = if (series) 1 else 0,
+            ep = if (series) 1 else 0,
+        )
+        onLinkUsed()
+    }
 
     BackHandler(enabled = playback != null) { playback = null }
 
@@ -84,6 +143,7 @@ private fun App() {
         key(currentPlayback.baseId, currentPlayback.localPath) {
             WatchScreen(
                 spec = currentPlayback,
+                inPip = inPip,
                 onBack = { playback = null },
                 onOpen = { open(it) },
             )
@@ -110,7 +170,7 @@ private fun App() {
                 )
 
                 else -> MeScreen(
-                    version = "1.5",
+                    version = "1.6",
                     onDownloads = { tab = 2 },
                     onOpen = { open(it) },
                 )

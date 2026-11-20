@@ -12,13 +12,21 @@ android {
         applicationId = "app.mbox"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.5"
+        versionCode = 6
+        versionName = "1.6"
     }
 
     buildTypes {
+        // CI ships debug-signed APKs, so both build types are shrunk: R8 + resource shrinking cut
+        // roughly a third of the install size (unused drawables, Media3 decoders, OkHttp branches).
+        debug {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -55,6 +63,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core")
 
     implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
 
     implementation("io.coil-kt:coil-compose:2.7.0")

@@ -1,6 +1,8 @@
 package app.mbox
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.os.StatFs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -11,6 +13,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
+import org.json.JSONArray
+import org.json.JSONObject
 import okhttp3.Request
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -89,6 +93,11 @@ object Downloads {
     private val _tasks = MutableStateFlow<List<Task>>(emptyList())
     val tasks: StateFlow<List<Task>> = _tasks.asStateFlow()
 
+    // The queue lives in prefs as well: Android kills the process while episodes download, and a
+    // task that only exists in memory comes back as a stuck "running" row forever.
+    private var prefs: SharedPreferences? = null
+    private var lastPersist = 0L
+
     fun folder(ctx: Context): File =
         (ctx.getExternalFilesDir("Downloads") ?: File(ctx.filesDir, "Downloads")).apply { mkdirs() }
 
@@ -96,6 +105,73 @@ object Downloads {
 
     private fun update(id: String, block: (Task) -> Task) {
         _tasks.update { list -> list.map { if (it.id == id) block(it) else it } }
+        persist()
+    }
+
+    private fun persist(force: Boolean = false) {
+        val store = prefs ?: return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastPersist < 2500L) return
+        lastPersist = now
+        val arr = JSONArray()
+        _tasks.value.forEach { t ->
+            arr.put(
+                JSONObject()
+                    .put("id", t.id)
+                    .put("title", t.title)
+                    .put("subtitle", t.subtitle)
+                    .put("url", t.url)
+                    .put("referer", t.referer)
+                    .put("path", t.path)
+                    .put("total", t.total)
+                    .put("done", t.done)
+                    // A transfer that was interrupted by the process dying restarts as paused.
+                    .put("status", if (t.status == RUNNING || t.status == "queued") PAUSED else t.status)
+            )
+        }
+        store.edit().putString("tasks", arr.toString()).apply()
+    }
+
+    /** Called once from [MBoxApp]; rebuilds the queue from disk and marks interrupted rows paused. */
+    fun restore(ctx: Context) {
+        prefs = ctx.applicationContext.getSharedPreferences("mbox_downloads", Context.MODE_PRIVATE)
+        val raw = prefs?.getString("tasks", "").orEmpty()
+        if (raw.isBlank()) return
+        val restored = ArrayList<Task>()
+        runCatching {
+            val arr = JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val path = o.optString("path")
+                val file = File(path)
+                val total = o.optLong("total")
+                val done = o.optLong("done")
+                val saved = o.optString("status")
+                val status = when {
+                    !file.exists() -> CANCELED
+                    total > 0 && file.length() >= total -> DONE
+                    saved == DONE -> DONE
+                    saved == CANCELED -> CANCELED
+                    else -> PAUSED
+                }
+                if (status == CANCELED) continue
+                restored.add(
+                    Task(
+                        id = o.optString("id"),
+                        title = o.optString("title"),
+                        subtitle = o.optString("subtitle"),
+                        url = o.optString("url"),
+                        referer = o.optString("referer"),
+                        path = path,
+                        total = total,
+                        done = if (status == DONE) (total.takeIf { it > 0 } ?: file.length()) else file.length().coerceAtLeast(done),
+                        status = status,
+                    )
+                )
+            }
+        }
+        if (restored.isNotEmpty()) _tasks.value = restored
+        persist(true)
     }
 
     private fun safeName(text: String): String =
@@ -114,6 +190,7 @@ object Downloads {
     ) {
         val existing = find(key)
         if (existing != null && (existing.status == RUNNING || existing.finished)) return
+        prefs = prefs ?: ctx.applicationContext.getSharedPreferences("mbox_downloads", Context.MODE_PRIVATE)
         val file = File(folder(ctx), safeName("$title $subtitle") + ".mp4")
         // A paused/failed task continues from the bytes already on disk.
         val offset = if (existing != null && file.exists()) file.length() else 0L
@@ -135,6 +212,7 @@ object Downloads {
             update(key) { it.copy(status = "queued") }
             if (!waiters.contains(key)) waiters.add(key)
             waiterStreams[key] = stream
+            persist(true)
             return
         }
 
@@ -181,6 +259,7 @@ object Downloads {
                     }
                 }
                 update(key) { it.copy(done = it.total, speed = 0L, status = DONE) }
+                persist(true)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) {
                     val keep = paused.remove(key)
@@ -188,6 +267,7 @@ object Downloads {
                     throw e
                 }
                 update(key) { it.copy(status = FAILED, speed = 0L) }
+                persist(true)
             } finally {
                 jobs.remove(key)
                 pump(ctx)
@@ -237,6 +317,7 @@ object Downloads {
         paused.add(key)
         jobs[key]?.cancel()
         update(key) { it.copy(status = PAUSED, speed = 0L) }
+        persist(true)
     }
 
     fun cancel(key: String) {
@@ -244,6 +325,7 @@ object Downloads {
         waiterStreams.remove(key)
         jobs.remove(key)?.cancel()
         update(key) { it.copy(status = CANCELED, speed = 0L) }
+        persist(true)
     }
 
     fun remove(ctx: Context, key: String) {
@@ -252,7 +334,19 @@ object Downloads {
         waiterStreams.remove(key)
         find(key)?.let { runCatching { File(it.path).delete() } }
         _tasks.update { list -> list.filterNot { it.id == key } }
+        persist(true)
     }
+
+    /** Bytes actually used by finished and half-finished episodes. */
+    fun folderSize(ctx: Context): Long {
+        val root = folder(ctx)
+        val files = root.listFiles() ?: return 0L
+        return files.filter { it.isFile }.sumOf { it.length() }
+    }
+
+    fun freeBytes(ctx: Context): Long = runCatching {
+        StatFs(folder(ctx).absolutePath).availableBytes
+    }.getOrDefault(0L)
 
     fun totalOnDisk(): Long = _tasks.value.filter { it.finished }.sumOf { it.done }
 }

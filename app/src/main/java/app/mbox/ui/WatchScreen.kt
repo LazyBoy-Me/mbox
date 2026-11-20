@@ -53,6 +53,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -83,6 +84,8 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.dash.DashMediaSource
+import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -90,6 +93,8 @@ import app.mbox.Api
 import app.mbox.Caption
 import app.mbox.Downloads
 import app.mbox.Dub
+import app.mbox.HistoryEntry
+import app.mbox.Pip
 import app.mbox.PlaySpec
 import app.mbox.R
 import app.mbox.Season
@@ -129,7 +134,12 @@ private fun sizeText(bytes: Long): String = when {
 
 @OptIn(UnstableApi::class)
 @Composable
-fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
+fun WatchScreen(
+    spec: PlaySpec,
+    inPip: Boolean = false,
+    onBack: () -> Unit,
+    onOpen: (Subject) -> Unit,
+) {
     val ctx = LocalContext.current
     val activity = remember(ctx) { ctx.activityOrNull() }
     val scope = rememberCoroutineScope()
@@ -184,6 +194,10 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
     // next-episode countdown
     var nextIn by remember { mutableStateOf(0) }
 
+    // resume prompt
+    var resumeAsk by remember { mutableStateOf<HistoryEntry?>(null) }
+    var resumeChecked by remember { mutableStateOf(false) }
+
     // download sheet
     var sheet by remember { mutableStateOf<List<StreamRes>>(emptyList()) }
     var sheetLoading by remember { mutableStateOf(false) }
@@ -213,9 +227,13 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                 )
             )
         }
-        player.setMediaSource(
-            ProgressiveMediaSource.Factory(ds).createMediaSource(builder.build())
-        )
+        val mediaItem = builder.build()
+        val source = when {
+            item.url.contains(".m3u8", true) -> HlsMediaSource.Factory(ds).createMediaSource(mediaItem)
+            item.url.contains(".mpd", true) -> DashMediaSource.Factory(ds).createMediaSource(mediaItem)
+            else -> ProgressiveMediaSource.Factory(ds).createMediaSource(mediaItem)
+        }
+        player.setMediaSource(source)
         player.prepare()
         if (startMs > 0) player.seekTo(startMs)
         player.setPlaybackSpeed(speed)
@@ -296,6 +314,18 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
             return@LaunchedEffect
         }
         setSource(orderCandidates(list).first(), start)
+    }
+
+    // Offer "resume from 12:34" once the real title id is known, never for a few stray seconds.
+    LaunchedEffect(detail.id) {
+        if (resumeChecked || localPlayback || detail.id.isBlank()) return@LaunchedEffect
+        resumeChecked = true
+        val saved = Store.historyFor(detail.id) ?: return@LaunchedEffect
+        if (saved.se == se && saved.ep == ep &&
+            saved.position > 60_000L && saved.duration - saved.position > 30_000L
+        ) {
+            resumeAsk = saved
+        }
     }
 
     // Subtitles are optional and cost two extra requests: fetch them only when CC is opened.
@@ -490,14 +520,66 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
     }
 
     fun enterPip() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
+        val act = activity ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            toast = "Picture in picture needs Android 8 or newer."
+            return
+        }
+        Pip.playing = isPlaying
+        Pip.hasNext = spec.series && ep < maxEp
+        Pip.title = detail.title.ifBlank { spec.title }
+        runCatching { act.enterPictureInPictureMode(Pip.params(act, autoEnter = false)) }
+            .onFailure { toast = "This device blocked picture-in-picture." }
+    }
+
+    // PiP belongs to the stock player: playback keeps running on Home, and the window carries
+    // play/pause, next-episode and rewind buttons that talk back to this same player.
+    SideEffect {
+        Pip.onToggle = { if (player.isPlaying) player.pause() else player.play() }
+        Pip.onNext = {
+            if (spec.series && ep < maxEp) {
+                ep += 1
+                pendingSeek = 0L
+            }
+        }
+        Pip.onBack10 = { seekBy(-10_000) }
+    }
+
+    DisposableEffect(Unit) {
+        Pip.active = true
+        onDispose {
+            Pip.active = false
+            Pip.onToggle = null
+            Pip.onNext = null
+            Pip.onBack10 = null
+            activity?.let { act ->
+                runCatching {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        act.setPictureInPictureParams(Pip.params(act, autoEnter = false))
+                    }
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(isPlaying, ep, maxEp, detail.title, inPip) {
+        Pip.playing = isPlaying
+        Pip.hasNext = spec.series && ep < maxEp
+        Pip.title = detail.title.ifBlank { spec.title }
+        val act = activity ?: return@LaunchedEffect
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching {
-                activity.enterPictureInPictureMode(
-                    PictureInPictureParams.Builder()
-                        .setAspectRatio(Rational(16, 9))
-                        .build()
+                act.setPictureInPictureParams(
+                    Pip.params(act, autoEnter = Pip.active && Pip.playing && !inPip)
                 )
             }
+        }
+    }
+
+    LaunchedEffect(inPip) {
+        if (!inPip) {
+            controlsVisible = true
+            menu = 0
         }
     }
 
@@ -506,7 +588,10 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .then(if (fullscreen) Modifier.weight(1f) else Modifier.aspectRatio(16f / 9f))
+                .then(
+                    if (fullscreen || inPip) Modifier.weight(1f)
+                    else Modifier.aspectRatio(16f / 9f)
+                )
                 .background(Color.Black),
         ) {
             AndroidView(
@@ -529,7 +614,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
             // One surface owns playback gestures: tap = chrome, double tap = ±10s,
             // hold = 2x, horizontal drag = seek, vertical drag = brightness / volume.
             // `requireUnconsumed` keeps button taps from also toggling the chrome.
-            Box(
+            if (!inPip) Box(
                 Modifier.fillMaxSize().pointerInput(locked, fullscreen) {
                     if (locked) return@pointerInput
                     var lastTapAt = 0L
@@ -676,7 +761,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                 )
             }
 
-            if (locked) {
+            if (locked && !inPip) {
                 Row(
                     Modifier
                         .align(Alignment.CenterStart)
@@ -698,7 +783,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                 }
             }
 
-            if (nextIn > 0) {
+            if (nextIn > 0 && !inPip) {
                 Column(
                     Modifier
                         .align(Alignment.BottomEnd)
@@ -717,7 +802,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                 }
             }
 
-            if (controlsVisible && !locked) {
+            if (controlsVisible && !locked && !inPip) {
                 // top bar
                 Row(
                     Modifier
@@ -1052,7 +1137,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                     PanelOverlay("Settings", Alignment.TopEnd) {
                         PanelLine("Fullscreen", "", fullscreen) { fullscreen = !fullscreen; menu = 0 }
                         PanelLine("Lock screen", "", locked) { locked = true; menu = 0 }
-                        PanelLine("Picture in picture", "beta", false) { enterPip(); menu = 0 }
+                        PanelLine("Picture in picture", "auto", false) { enterPip(); menu = 0 }
                         PanelLine("Auto play next", "", Store.autoplayNext) {
                             Store.autoplayNext = !Store.autoplayNext
                         }
@@ -1090,7 +1175,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
         }
 
         // ------------------------------------------------------------------ details
-        if (!fullscreen) {
+        if (!fullscreen && !inPip) {
             Column(
                 Modifier
                     .weight(1f)
@@ -1162,7 +1247,8 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                             val link = if (slug.isEmpty()) detail.title else "https://movie-box.co/movies/$slug"
                             val send = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
-                                putExtra(Intent.EXTRA_TEXT, "${detail.title}\n$link")
+                                val deep = "mbox://subject/${detail.id.ifBlank { spec.baseId }}"
+                                putExtra(Intent.EXTRA_TEXT, "${detail.title}\n$link\n$deep")
                             }
                             runCatching { ctx.startActivity(Intent.createChooser(send, "Share")) }
                         }
@@ -1353,6 +1439,42 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                 Spacer(Modifier.height(10.dp))
                 Text("Close", color = AccentSoft, fontSize = 13.sp,
                     modifier = Modifier.clickable { showInfo = false }.padding(4.dp))
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ resume prompt
+    resumeAsk?.let { saved ->
+        androidx.compose.ui.window.Dialog(onDismissRequest = { resumeAsk = null }) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF17191E))
+                    .padding(16.dp),
+            ) {
+                Text("Continue watching?", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    (detail.title.ifBlank { spec.title }) + " · " + fmtTime(saved.position) +
+                        if (spec.series) " · S${saved.se} E${saved.ep}" else "",
+                    color = TextMute,
+                    fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SmallAction("Start over") {
+                        player.seekTo(0L)
+                        positionMs = 0L
+                        resumeAsk = null
+                    }
+                    SmallAction("Resume from " + fmtTime(saved.position)) {
+                        player.seekTo(saved.position)
+                        positionMs = saved.position
+                        controlsVisible = true
+                        resumeAsk = null
+                    }
+                }
             }
         }
     }

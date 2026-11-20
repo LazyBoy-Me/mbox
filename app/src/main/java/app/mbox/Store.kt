@@ -45,6 +45,11 @@ object Store {
         get() = p()?.getFloat("speed", 1f) ?: 1f
         set(v) { p()?.edit()?.putFloat("speed", v)?.apply() }
 
+    /** Last fatal error, captured by [MBoxApp] and shown under Me → About. */
+    var lastCrash: String
+        get() = p()?.getString("lastCrash", "") ?: ""
+        set(v) { p()?.edit()?.putString("lastCrash", v)?.apply() }
+
     // ------------------------------------------------------------------ history
 
     private fun readHistory(): MutableList<HistoryEntry> {
@@ -60,6 +65,7 @@ object Store {
                         id = o.optString("id"),
                         title = o.optString("title"),
                         cover = o.optString("cover"),
+                        still = o.optString("still"),
                         type = o.optInt("type", 1),
                         se = o.optInt("se"),
                         ep = o.optInt("ep"),
@@ -79,6 +85,7 @@ object Store {
             arr.put(
                 JSONObject()
                     .put("id", h.id).put("title", h.title).put("cover", h.cover)
+                    .put("still", h.still)
                     .put("type", h.type).put("se", h.se).put("ep", h.ep)
                     .put("pos", h.position).put("dur", h.duration).put("upd", h.updated)
             )
@@ -94,7 +101,8 @@ object Store {
         list.removeAll { it.id == s.id && it.se == se && it.ep == ep }
         list.add(
             HistoryEntry(
-                id = s.id, title = s.title, cover = s.cover, type = s.type,
+                id = s.id, title = s.title, cover = s.cover,
+                still = s.still.ifBlank { s.cover }, type = s.type,
                 se = se, ep = ep, position = position, duration = duration,
                 updated = System.currentTimeMillis(),
             )
@@ -124,6 +132,7 @@ object Store {
                         title = o.optString("title"),
                         type = o.optInt("type", 1),
                         cover = o.optString("cover"),
+                        still = o.optString("still"),
                         year = o.optString("year"),
                         genre = o.optString("genre"),
                         rating = o.optString("rating"),

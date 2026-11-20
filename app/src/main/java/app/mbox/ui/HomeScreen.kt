@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -113,27 +116,40 @@ fun HomeScreen(
             return@Column
         }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 24.dp),
-        ) {
-            when {
-                category != "All" -> {
-                    item { SectionHeader(category) }
-                    item {
-                        when {
-                            genreLoading -> Box(
-                                Modifier.fillMaxWidth().padding(40.dp),
-                                contentAlignment = Alignment.Center,
-                            ) { LoadingBox(Modifier.height(60.dp)) }
+        if (category != "All") {
+            // A lazy grid only composes visible posters; the old chunked rows built the whole list.
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                item(span = { GridItemSpan(maxLineSpan) }) { SectionHeader(category) }
+                when {
+                    genreLoading -> item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(
+                            Modifier.fillMaxWidth().padding(40.dp),
+                            contentAlignment = Alignment.Center,
+                        ) { LoadingBox(Modifier.height(60.dp)) }
+                    }
 
-                            genreItems.isEmpty() -> MessageBox("Nothing in $category right now.")
-                            else -> PosterGrid(genreItems, onOpen)
-                        }
+                    genreItems.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) {
+                        MessageBox("Nothing in $category right now.")
+                    }
+
+                    else -> items(genreItems.size) { i ->
+                        val s = genreItems[i]
+                        PosterCard(s, Modifier.fillMaxWidth()) { onOpen(s) }
                     }
                 }
-
-                else -> {
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
+                run {
                     val hero = movies.ifEmpty { all }.take(6)
                     if (hero.isNotEmpty()) {
                         item { HeroPager(hero, onOpen) }
@@ -162,8 +178,10 @@ fun HomeScreen(
                         }
                     }
                     if (movies.isNotEmpty()) {
-                        item { SectionHeader("Trending Now", "Rankings") { showRank = true } }
-                        item { PosterGrid(movies.take(18), onOpen) }
+                        item { SectionHeader("Top 10 this week", "Rankings") { showRank = true } }
+                        item { HorizontalPosterRow(movies.take(10), onOpen, showRank = true) }
+                        item { SectionHeader("Popular Movies") }
+                        item { PosterGrid(movies.drop(10).ifEmpty { movies }.take(18), onOpen) }
                     }
                     sections.filter { it.name.contains("Movie", true).not() && it.items.isNotEmpty() }
                         .take(6)
@@ -312,16 +330,16 @@ private fun TipBanner(onDownloads: () -> Unit) {
 
 @Composable
 private fun HistoryCard(h: app.mbox.HistoryEntry, onClick: (app.mbox.HistoryEntry) -> Unit) {
-    Column(Modifier.width(104.dp).clickable { onClick(h) }) {
+    Column(Modifier.width(156.dp).clickable { onClick(h) }) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .aspectRatio(1.4f)
+                .aspectRatio(16f / 9f)
                 .clip(RoundedCornerShape(5.dp))
                 .background(Surface2),
         ) {
             AsyncImage(
-                model = h.cover,
+                model = h.still.ifBlank { h.cover },
                 contentDescription = h.title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
@@ -344,7 +362,10 @@ private fun HistoryCard(h: app.mbox.HistoryEntry, onClick: (app.mbox.HistoryEntr
         Spacer(Modifier.height(4.dp))
         Text(h.title, color = TextMain, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(
-            if (h.type == 2) "S${h.se} E${h.ep}" else "Movie",
+            buildString {
+                if (h.type == 2) append("S${h.se} E${h.ep}  ·  ")
+                append("${(h.progress * 100).toInt()}% watched")
+            },
             color = TextMute,
             fontSize = 10.sp,
             maxLines = 1,

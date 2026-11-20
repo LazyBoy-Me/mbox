@@ -13,8 +13,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -116,31 +117,21 @@ fun RankScreen(onBack: () -> Unit, onOpen: (Subject) -> Unit) {
             loading -> LoadingBox()
             boards.isEmpty() -> MessageBox("Ranking boards are unavailable right now.")
             items.isEmpty() -> MessageBox("This board has no titles yet.")
-            else -> LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
-                item { RankedGrid(items, onOpen) }
-            }
-        }
-    }
-}
-
-/** Rank badge + poster, three per row, keeping the board order. */
-@Composable
-private fun RankedGrid(items: List<Subject>, onOpen: (Subject) -> Unit) {
-    Column(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        items.withIndex().chunked(3).forEach { chunk ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                chunk.forEach { (index, s) ->
+            else -> LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items(items.size) { i ->
                     PosterCard(
-                        subject = s,
-                        modifier = Modifier.weight(1f),
-                        showRank = index + 1,
-                        onClick = { onOpen(s) },
+                        subject = items[i],
+                        modifier = Modifier.fillMaxWidth(),
+                        showRank = i + 1,
+                        onClick = { onOpen(items[i]) },
                     )
                 }
-                repeat(3 - chunk.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }

@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -30,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,6 +51,7 @@ fun MeScreen(
     onDownloads: () -> Unit,
     onOpen: (Subject) -> Unit,
 ) {
+    val ctx = LocalContext.current
     var page by remember { mutableStateOf(0) }
     var history by remember { mutableStateOf(Store.history()) }
     var myList by remember { mutableStateOf(Store.myList()) }
@@ -173,7 +177,7 @@ fun MeScreen(
                 MeRowValue(
                     R.drawable.ic_movie_download,
                     "Downloaded files",
-                    sizeText(DownloadsOnDisk()),
+                    sizeText(app.mbox.Downloads.folderSize(ctx)),
                 ) { onDownloads() }
             }
 
@@ -181,6 +185,17 @@ fun MeScreen(
             item {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Text("MBox $version", color = TextDim, fontSize = 13.sp)
+                    val crash = remember { Store.lastCrash }
+                    if (crash.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Last crash: " + crash.lineSequence().first(),
+                            color = Color(0xFFFF8A80),
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     Spacer(Modifier.height(3.dp))
                     Text(
                         "Playback: web BFF streams (referer-pinned), no account, no VIP.",
@@ -200,9 +215,6 @@ fun MeScreen(
         }
     }
 }
-
-@Composable
-private fun DownloadsOnDisk(): Long = app.mbox.Downloads.totalOnDisk()
 
 private fun sizeText(bytes: Long): String = when {
     bytes <= 0L -> "0 MB"
@@ -348,8 +360,9 @@ private fun HistoryPage(
                         Modifier.size(96.dp, 56.dp).clip(RoundedCornerShape(4.dp)).background(Surface2),
                     ) {
                         AsyncImage(
-                            model = h.cover,
+                            model = h.still.ifBlank { h.cover },
                             contentDescription = h.title,
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                             modifier = Modifier.fillMaxSize(),
                         )
                         Box(
@@ -393,8 +406,16 @@ private fun ListPage(items: List<Subject>, onBack: () -> Unit, onOpen: (Subject)
             MessageBox("Titles you like are saved here.")
             return@Column
         }
-        LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
-            item { PosterGrid(items, onOpen) }
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(3),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            items(items.size) { i ->
+                PosterCard(items[i], Modifier.fillMaxWidth()) { onOpen(items[i]) }
+            }
         }
     }
 }

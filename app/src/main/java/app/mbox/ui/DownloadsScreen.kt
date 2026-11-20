@@ -22,6 +22,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,13 +39,23 @@ import app.mbox.PlaySpec
 fun DownloadsScreen(onOpen: (PlaySpec) -> Unit) {
     val ctx = LocalContext.current
     val tasks by Downloads.tasks.collectAsState()
+    // Walking the folder on every progress tick would hit the disk twice a second.
+    val used = remember(tasks.size, tasks.count { it.finished }) { Downloads.folderSize(ctx) }
+    val free = remember { Downloads.freeBytes(ctx) }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
         Row(
             Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Downloads", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Column(Modifier.weight(1f)) {
+                Text("Downloads", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "${fmtBytes(used)} used · ${fmtBytes(free)} free",
+                    color = TextMute,
+                    fontSize = 10.sp,
+                )
+            }
             if (tasks.isNotEmpty()) {
                 Text(
                     "Clear finished",

@@ -145,6 +145,8 @@ data class HistoryEntry(
     val id: String,
     val title: String,
     val cover: String,
+    /** 16:9 still from the detail payload; the stock app uses it on Continue Watching cards. */
+    val still: String = "",
     val type: Int,
     val se: Int,
     val ep: Int,

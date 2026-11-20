@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -527,8 +529,16 @@ private fun BrowseResults(
         when {
             loading -> LoadingBox()
             items.isEmpty() -> MessageBox("No titles match these filters.")
-            else -> LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
-                item { PosterGrid(items, onOpen) }
+            else -> LazyVerticalGrid(
+                columns = GridCells.Fixed(3),
+                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                items(items.size) { i ->
+                    PosterCard(items[i], Modifier.fillMaxWidth()) { onOpen(items[i]) }
+                }
             }
         }
     }
