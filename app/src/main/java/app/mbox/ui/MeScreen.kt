@@ -50,6 +50,7 @@ fun MeScreen(
     version: String,
     onDownloads: () -> Unit,
     onOpen: (Subject) -> Unit,
+    onResume: (HistoryEntry) -> Unit,
 ) {
     val ctx = LocalContext.current
     var page by remember { mutableStateOf(0) }
@@ -60,9 +61,7 @@ fun MeScreen(
         1 -> HistoryPage(
             items = history,
             onBack = { page = 0; history = Store.history() },
-            onOpen = { h ->
-                onOpen(Subject(id = h.id, title = h.title, type = h.type, cover = h.cover))
-            },
+            onOpen = { h -> onResume(h) },
             onRemove = { id ->
                 Store.removeHistory(id)
                 history = Store.history()

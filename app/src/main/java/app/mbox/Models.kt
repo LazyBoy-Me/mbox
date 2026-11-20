@@ -73,6 +73,8 @@ data class PlaySpec(
     val maxEp: Int = 0,        // last episode of the current season (for "next episode")
     /** Play a downloaded file straight from disk instead of the network. */
     val localPath: String = "",
+    /** Resume position carried over from Continue Watching / watch history. */
+    val startMs: Long = 0L,
 )
 
 data class SniffInfo(

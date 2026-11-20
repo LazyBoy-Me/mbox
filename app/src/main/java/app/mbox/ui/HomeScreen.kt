@@ -52,6 +52,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun HomeScreen(
     onOpen: (Subject) -> Unit,
+    onResume: (app.mbox.HistoryEntry) -> Unit,
     onSearch: () -> Unit,
     onDownloads: () -> Unit,
 ) {
@@ -64,6 +65,7 @@ fun HomeScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(Store.history().take(10)) }
     var showRank by remember { mutableStateOf(false) }
+    var showBrowse by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val hot = runCatching { Api.hotSections() }.getOrNull()
@@ -99,12 +101,22 @@ fun HomeScreen(
         return
     }
 
+    if (showBrowse) {
+        BrowseScreen(
+            onBack = { showBrowse = false },
+            onOpen = onOpen,
+            startGenre = category.takeIf { it != "All" }.orEmpty(),
+        )
+        return
+    }
+
     Column(Modifier.fillMaxSize().background(Bg)) {
         TopBar(onSearch = onSearch, onDownloads = onDownloads)
         GenreStrip(
             items = listOf("All") + genres,
             selected = category,
             onSelect = { category = it },
+            onBrowse = { showBrowse = true },
         )
 
         if (!loaded) {
@@ -163,16 +175,7 @@ fun HomeScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 items(history.size) { i ->
-                                    HistoryCard(history[i]) { h ->
-                                        onOpen(
-                                            Subject(
-                                                id = h.id,
-                                                title = h.title,
-                                                type = h.type,
-                                                cover = h.cover,
-                                            )
-                                        )
-                                    }
+                                    HistoryCard(history[i]) { h -> onResume(h) }
                                 }
                             }
                         }

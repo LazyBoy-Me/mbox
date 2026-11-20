@@ -33,10 +33,12 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -88,6 +90,7 @@ import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import app.mbox.Api
 import app.mbox.Caption
@@ -160,6 +163,7 @@ fun WatchScreen(
     var showInfo by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
     var showSeasonMenu by remember { mutableStateOf(false) }
+    var showEpisodes by remember { mutableStateOf(false) }
     var person by remember { mutableStateOf<Staff?>(null) }
 
     // ------------------------------------------------------------------ playback
@@ -168,7 +172,7 @@ fun WatchScreen(
     var status by remember { mutableStateOf<String?>("Preparing stream…") }
     var error by remember { mutableStateOf<String?>(null) }
     var retryKey by remember { mutableStateOf(0) }
-    var pendingSeek by remember { mutableStateOf(0L) }
+    var pendingSeek by remember { mutableStateOf(spec.startMs) }
 
     // ------------------------------------------------------------------ chrome
     var fullscreen by remember { mutableStateOf(false) }
@@ -178,6 +182,8 @@ fun WatchScreen(
     var speed by remember { mutableStateOf(Store.speed) }
     var scale by remember { mutableStateOf(Store.scaleMode) }
     var playerView by remember { mutableStateOf<PlayerView?>(null) }
+    var subSize by remember { mutableStateOf(Store.subSize) }
+    var subBackground by remember { mutableStateOf(Store.subBackground) }
 
     var isPlaying by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(true) }
@@ -334,6 +340,17 @@ fun WatchScreen(
             captionsLoading = true
             captions = runCatching { Api.captionsFor(activeDub, se, ep) }.getOrDefault(emptyList())
             captionsLoading = false
+            val pref = Store.subtitleLang
+            if (pref != "Off" && caption == null) {
+                val match = captions.firstOrNull {
+                    it.lang.contains(pref, true) || it.name.contains(pref, true)
+                }
+                if (match != null) {
+                    val pos = player.currentPosition.coerceAtLeast(0)
+                    caption = match
+                    streams.firstOrNull { it === current }?.let { setSource(it, pos) }
+                }
+            }
         }
     }
 
@@ -401,6 +418,28 @@ fun WatchScreen(
             delay(6000)
             controlsVisible = false
         }
+    }
+
+    // Subtitle look follows the player settings instead of Media3's default 5% white-on-nothing.
+    LaunchedEffect(subSize, subBackground, playerView) {
+        val view = playerView?.subtitleView ?: return@LaunchedEffect
+        val bg = if (subBackground) {
+            android.graphics.Color.argb(150, 0, 0, 0)
+        } else {
+            android.graphics.Color.TRANSPARENT
+        }
+        view.setStyle(
+            CaptionStyleCompat(
+                android.graphics.Color.WHITE,
+                bg,
+                android.graphics.Color.TRANSPARENT,
+                CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                android.graphics.Color.BLACK,
+                null,
+            )
+        )
+        view.setApplyEmbeddedStyles(false)
+        view.setFractionalTextSize(0.053f * subSize)
     }
 
     LaunchedEffect(scale) {
@@ -1124,6 +1163,27 @@ fun WatchScreen(
                         } else if (captions.isEmpty()) {
                             PanelLine("No subtitle track", "", false) {}
                         }
+                        PanelLine(
+                            "Text size",
+                            when {
+                                subSize < 0.95f -> "small"
+                                subSize > 1.1f -> "large"
+                                else -> "normal"
+                            },
+                            false,
+                        ) {
+                            val next = when {
+                                subSize < 0.95f -> 1f
+                                subSize < 1.1f -> 1.25f
+                                else -> 0.85f
+                            }
+                            subSize = next
+                            Store.subSize = next
+                        }
+                        PanelLine("Background", if (subBackground) "on" else "off", subBackground) {
+                            subBackground = !subBackground
+                            Store.subBackground = subBackground
+                        }
                     }
                     6 -> PanelOverlay("Screen", Alignment.BottomEnd) {
                         SCALES.forEachIndexed { i, name ->
@@ -1253,6 +1313,13 @@ fun WatchScreen(
                             runCatching { ctx.startActivity(Intent.createChooser(send, "Share")) }
                         }
                     }
+                    if (detail.trailer.isNotBlank()) {
+                        IconAction(R.drawable.ic_player_play, "Trailer") {
+                            runCatching {
+                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(detail.trailer)))
+                            }.onFailure { toast = "No app can open the trailer." }
+                        }
+                    }
                     IconAction(R.drawable.ic_movie_download, "Download") {
                         loadQualities(if (spec.series) ep else 0)
                     }
@@ -1304,7 +1371,7 @@ fun WatchScreen(
                     if (spec.series && seasons.isNotEmpty()) {
                         DropDown("Season " + "%02d".format(se)) { showSeasonMenu = !showSeasonMenu }
                     }
-                    DropDown("${maxEp.coerceAtLeast(1)} episodes") { showSeasonMenu = !showSeasonMenu }
+                    DropDown("${maxEp.coerceAtLeast(1)} episodes") { showEpisodes = true }
                 }
                 if (showSeasonMenu && seasons.isNotEmpty()) {
                     MenuBlock {
@@ -1414,33 +1481,23 @@ fun WatchScreen(
         )
     }
 
-    // ------------------------------------------------------------------ info sheet
+    // ------------------------------------------------------------------ detail page
     if (showInfo) {
-        androidx.compose.ui.window.Dialog(onDismissRequest = { showInfo = false }) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF17191E))
-                    .padding(16.dp),
-            ) {
-                Text(detail.title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(10.dp))
-                InfoLine("Type", if (spec.series) "TV Series" else "Movie")
-                InfoLine("Year", detail.year)
-                InfoLine("Country", detail.country)
-                InfoLine("Language", detail.language)
-                InfoLine("Genre", detail.genre)
-                InfoLine("Duration", detail.duration)
-                InfoLine("Rating", if (detail.rating.isBlank()) "" else "${detail.rating} / 10")
-                InfoLine("Content rating", detail.contentRating)
-                InfoLine("Views", detail.viewers)
-                if (detail.aka.isNotBlank()) InfoLine("Also known as", detail.aka)
-                Spacer(Modifier.height(10.dp))
-                Text("Close", color = AccentSoft, fontSize = 13.sp,
-                    modifier = Modifier.clickable { showInfo = false }.padding(4.dp))
-            }
-        }
+        DetailPage(
+            subject = detail,
+            seasonCount = seasons.size,
+            episodeLabel = if (spec.series) "S${"%02d".format(se)} E${"%02d".format(ep)}" else "Movie",
+            onClose = { showInfo = false },
+            onPlay = {
+                showInfo = false
+                controlsVisible = true
+            },
+            onDownload = {
+                showInfo = false
+                loadQualities(if (spec.series) ep else 0)
+            },
+            onPerson = { person = it },
+        )
     }
 
     // ------------------------------------------------------------------ resume prompt
@@ -1473,6 +1530,113 @@ fun WatchScreen(
                         positionMs = saved.position
                         controlsVisible = true
                         resumeAsk = null
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ episode sheet
+    if (showEpisodes) {
+        val watched = remember {
+            Store.history().filter { it.id == detail.id && it.se == se }.associateBy { it.ep }
+        }
+        androidx.compose.ui.window.Dialog(onDismissRequest = { showEpisodes = false }) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF17191E))
+                    .padding(14.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Season " + "%02d".format(se),
+                        color = TextMain,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text("${maxEp.coerceAtLeast(1)} episodes", color = TextMute, fontSize = 11.sp)
+                }
+                Spacer(Modifier.height(10.dp))
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    items(maxEp) { i ->
+                        val e = i + 1
+                        val seen = watched[e]
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (e == ep) Color(0xFF11221A) else Surface1)
+                                .clickable {
+                                    ep = e
+                                    pendingSeek = 0L
+                                    showEpisodes = false
+                                }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "%02d".format(e),
+                                color = if (e == ep) AccentSoft else TextDim,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.width(28.dp),
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    "Episode $e",
+                                    color = if (e == ep) AccentSoft else TextMain,
+                                    fontSize = 12.sp,
+                                )
+                                Text(
+                                    when {
+                                        e == ep -> "Now playing"
+                                        seen != null -> "Watched · ${(seen.progress * 100).toInt()}%"
+                                        else -> "Tap to play"
+                                    },
+                                    color = TextMute,
+                                    fontSize = 9.sp,
+                                )
+                            }
+                            Box(
+                                Modifier
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(Surface2)
+                                    .clickable { loadQualities(e) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_movie_download),
+                                    contentDescription = "Download episode $e",
+                                    tint = AccentSoft,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Box(
+                                Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(Accent)
+                                    .clickable {
+                                        ep = e
+                                        pendingSeek = 0L
+                                        showEpisodes = false
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_player_play),
+                                    contentDescription = "Play episode $e",
+                                    tint = Color.Black,
+                                    modifier = Modifier.size(11.dp),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -1536,7 +1700,8 @@ fun WatchScreen(
                 if (spec.series && sheet.isNotEmpty() && !sheetLoading) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Queue episodes 1–20 of this season",
+                        "Download the rest of this season (" +
+                            "${(maxEp - ep + 1).coerceAtLeast(0)} episodes)",
                         color = AccentSoft,
                         fontSize = 11.sp,
                         modifier = Modifier.clickable {
@@ -1544,7 +1709,7 @@ fun WatchScreen(
                             val pick = sheet.firstOrNull()
                             if (pick != null) {
                                 scope.launch {
-                                    for (e in 1..maxEp.coerceAtMost(20)) {
+                                    for (e in ep..maxEp.coerceAtMost(ep + 39)) {
                                         val list = runCatching { Api.h5Play(activeDub, se, e) }
                                             .getOrDefault(emptyList())
                                         val same = list.firstOrNull { it.resolution == pick.resolution }
@@ -1558,7 +1723,7 @@ fun WatchScreen(
                                         )
                                         delay(400)
                                     }
-                                    toast = "Queued ${maxEp.coerceAtMost(20)} episodes"
+                                    toast = "Queued the rest of the season"
                                 }
                             }
                             sheet = emptyList()

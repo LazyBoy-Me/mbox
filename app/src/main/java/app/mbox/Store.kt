@@ -41,6 +41,15 @@ object Store {
         get() = p()?.getInt("scale", 0) ?: 0
         set(v) { p()?.edit()?.putInt("scale", v)?.apply() }
 
+    /** Subtitle render scale (0.85 small, 1 normal, 1.25 large) and translation background. */
+    var subSize: Float
+        get() = p()?.getFloat("subSize", 1f) ?: 1f
+        set(v) { p()?.edit()?.putFloat("subSize", v)?.apply() }
+
+    var subBackground: Boolean
+        get() = p()?.getBoolean("subBg", true) ?: true
+        set(v) { p()?.edit()?.putBoolean("subBg", v)?.apply() }
+
     var speed: Float
         get() = p()?.getFloat("speed", 1f) ?: 1f
         set(v) { p()?.edit()?.putFloat("speed", v)?.apply() }

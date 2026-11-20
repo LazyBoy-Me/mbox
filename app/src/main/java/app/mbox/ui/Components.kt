@@ -102,11 +102,33 @@ fun TopBar(onSearch: () -> Unit, onDownloads: () -> Unit) {
 
 /** Genre chips with the brand underline the stock app draws under the active tab. */
 @Composable
-fun GenreStrip(items: List<String>, selected: String, onSelect: (String) -> Unit) {
+fun GenreStrip(
+    items: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+    onBrowse: (() -> Unit)? = null,
+) {
     LazyRow(
         contentPadding = PaddingValues(horizontal = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
+        if (onBrowse != null) {
+            item {
+                Row(
+                    Modifier
+                        .clickable(onClick = onBrowse)
+                        .padding(horizontal = 8.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Browse", color = AccentSoft, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Image(
+                        painter = painterResource(R.drawable.ic_arrow_right_white_small),
+                        contentDescription = null,
+                        modifier = Modifier.size(11.dp),
+                    )
+                }
+            }
+        }
         items(items.size) { i ->
             val name = items[i]
             val active = name == selected

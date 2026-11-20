@@ -37,6 +37,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.mbox.HistoryEntry
 import app.mbox.ui.Bg
 import app.mbox.ui.DownloadsScreen
 import app.mbox.ui.HomeScreen
@@ -129,6 +130,17 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
 
     // Every tap opens the one watch screen: video on top, then audio/season/episode lists.
     // Movies are addressed as se=0&ep=0, series start at season 1 episode 1.
+    fun resume(h: HistoryEntry) {
+        playback = PlaySpec(
+            baseId = h.id,
+            title = h.title,
+            series = h.type == 2,
+            se = if (h.type == 2) h.se else 0,
+            ep = if (h.type == 2) h.ep else 0,
+            startMs = h.position,
+        )
+    }
+
     fun open(s: Subject) {
         playback = PlaySpec(
             baseId = s.id,
@@ -156,6 +168,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
             when (tab) {
                 0 -> HomeScreen(
                     onOpen = { open(it) },
+                    onResume = { resume(it) },
                     onSearch = { tab = 1 },
                     onDownloads = { tab = 2 },
                 )
@@ -173,6 +186,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                     version = "1.6",
                     onDownloads = { tab = 2 },
                     onOpen = { open(it) },
+                    onResume = { resume(it) },
                 )
             }
         }

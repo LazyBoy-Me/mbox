@@ -545,7 +545,7 @@ private fun BrowseResults(
 }
 
 @Composable
-private fun FilterDialog(
+fun FilterDialog(
     options: FilterOptions,
     genre: String,
     country: String,
