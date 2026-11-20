@@ -25,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +39,7 @@ import app.mbox.Api
 import app.mbox.FilterOptions
 import app.mbox.R
 import app.mbox.Subject
+import kotlinx.coroutines.launch
 
 /**
  * Full catalog browser: genre chips plus the country / year / sort sheet the web filter page
@@ -59,6 +61,7 @@ fun BrowseScreen(
     var page by remember { mutableStateOf(1) }
     var more by remember { mutableStateOf(false) }
     var showFilter by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         options = runCatching { Api.filterOptions() }.getOrDefault(FilterOptions())
@@ -78,17 +81,19 @@ fun BrowseScreen(
         if (loading || !more) return
         loading = true
         val next = page + 1
-        val add = runCatching {
-            Api.filtered(0, genre, country, year, sort, next)
-        }.getOrDefault(emptyList())
-        if (add.isEmpty()) {
-            more = false
-        } else {
-            page = next
-            items = items + add
-            more = add.size >= 30
+        scope.launch {
+            val add = runCatching {
+                Api.filtered(0, genre, country, year, sort, next)
+            }.getOrDefault(emptyList())
+            if (add.isEmpty()) {
+                more = false
+            } else {
+                page = next
+                items = items + add
+                more = add.size >= 30
+            }
+            loading = false
         }
-        loading = false
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
