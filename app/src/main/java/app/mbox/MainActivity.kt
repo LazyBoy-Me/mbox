@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -109,7 +110,7 @@ private fun App() {
                 )
 
                 else -> MeScreen(
-                    version = "1.4",
+                    version = "1.5",
                     onDownloads = { tab = 2 },
                     onOpen = { open(it) },
                 )
@@ -121,18 +122,22 @@ private fun App() {
 
 @Composable
 private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
-    Row(
-        Modifier
-            .background(androidx.compose.ui.graphics.Color(0xFF16181D))
-            .height(56.dp)
-            .padding(horizontal = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceEvenly,
-    ) {
-        TabItem("Home", R.drawable.ic_tab_home_active, R.drawable.ic_tab_home_unactive_dark, selected == 0) { onSelect(0) }
-        TabItem("Search", R.drawable.ic_search, R.drawable.ic_search, selected == 1, plain = true) { onSelect(1) }
-        TabItem("Downloads", R.drawable.ic_tab_downloads_active, R.drawable.ic_tab_downloads_unactive_dark, selected == 2) { onSelect(2) }
-        TabItem("Me", R.drawable.ic_tab_me_active, R.drawable.ic_tab_me_unactive_dark, selected == 3) { onSelect(3) }
+    Column(Modifier.fillMaxWidth()) {
+        Box(Modifier.fillMaxWidth().height(0.5.dp).background(androidx.compose.ui.graphics.Color(0x1FFFFFFF)))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .background(androidx.compose.ui.graphics.Color(0xFF16181D))
+                .height(58.dp)
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            TabItem("Home", R.drawable.ic_tab_home_active, R.drawable.ic_tab_home_unactive_dark, selected == 0) { onSelect(0) }
+            TabItem("Search", R.drawable.ic_tab_search, R.drawable.ic_tab_search, selected == 1, plain = true) { onSelect(1) }
+            TabItem("Downloads", R.drawable.ic_tab_downloads_active, R.drawable.ic_tab_downloads_unactive_dark, selected == 2) { onSelect(2) }
+            TabItem("Me", R.drawable.ic_tab_me_active, R.drawable.ic_tab_me_unactive_dark, selected == 3) { onSelect(3) }
+        }
     }
 }
 
@@ -147,30 +152,32 @@ private fun TabItem(
 ) {
     Column(
         Modifier
-            .width(72.dp)
-            .clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .width(74.dp)
+            .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(vertical = 6.dp),
+            .padding(vertical = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         if (plain) {
             androidx.compose.material3.Icon(
                 painter = painterResource(inactiveIcon),
                 contentDescription = label,
-                tint = if (active) androidx.compose.ui.graphics.Color(0xFF2FF58B) else TextMute,
-                modifier = Modifier.size(20.dp),
+                tint = if (active) androidx.compose.ui.graphics.Color(0xFF2FF58B)
+                else androidx.compose.ui.graphics.Color(0xE6FFFFFF),
+                modifier = Modifier.size(24.dp),
             )
         } else {
             Image(
                 painter = painterResource(if (active) activeIcon else inactiveIcon),
                 contentDescription = label,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(24.dp),
             )
         }
-        Spacer(Modifier.height(2.dp))
+        Spacer(Modifier.height(3.dp))
         Text(
             label,
-            color = if (active) androidx.compose.ui.graphics.Color(0xFF2FF58B) else TextMute,
+            color = if (active) androidx.compose.ui.graphics.Color(0xFF2FF58B)
+            else androidx.compose.ui.graphics.Color(0x99FFFFFF),
             fontSize = 10.sp,
             fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
         )

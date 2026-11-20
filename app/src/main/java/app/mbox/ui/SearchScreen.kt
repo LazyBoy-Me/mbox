@@ -37,6 +37,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +82,8 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
     var fSort by remember { mutableStateOf("") }
     var browseItems by remember { mutableStateOf<List<Subject>>(emptyList()) }
     var person by remember { mutableStateOf<app.mbox.Staff?>(null) }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
 
     LaunchedEffect(Unit) {
         val rank = runCatching { Api.searchRank() }.getOrNull()
@@ -125,6 +129,9 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
         live = emptyList()
         Store.addSearch(w)
         history = Store.searchHistory()
+        // Enter on the keyboard (or tapping Search / a suggestion) closes the IME and drops focus.
+        keyboard?.hide()
+        focus.clearFocus()
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {

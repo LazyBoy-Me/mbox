@@ -14,9 +14,12 @@ import android.os.Build
 import android.util.Rational
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,6 +58,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
@@ -92,6 +98,7 @@ import app.mbox.Store
 import app.mbox.StreamRes
 import app.mbox.Subject
 import coil.compose.AsyncImage
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -138,6 +145,7 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
     var recommendations by remember { mutableStateOf<List<Subject>>(emptyList()) }
     var captions by remember { mutableStateOf<List<Caption>>(emptyList()) }
     var caption by remember { mutableStateOf<Caption?>(null) }
+    var captionsLoading by remember { mutableStateOf(false) }
     var expanded by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
@@ -165,8 +173,6 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
     var buffering by remember { mutableStateOf(true) }
     var positionMs by remember { mutableStateOf(0L) }
     var durationMs by remember { mutableStateOf(0L) }
-    var seeking by remember { mutableStateOf(false) }
-    var seekValue by remember { mutableStateOf(0f) }
 
     // gestures
     var dragMode by remember { mutableStateOf(0) } // 1 seek, 2 brightness, 3 volume
@@ -290,14 +296,22 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
             return@LaunchedEffect
         }
         setSource(orderCandidates(list).first(), start)
-        // subtitles load after the stream, they are optional
-        runCatching { Api.captionsFor(activeDub, se, ep) }.onSuccess { captions = it }
+    }
+
+    // Subtitles are optional and cost two extra requests: fetch them only when CC is opened.
+    LaunchedEffect(menu, activeDub, se, ep) {
+        if (menu == 5 && captions.isEmpty() && !localPlayback) {
+            captionsLoading = true
+            captions = runCatching { Api.captionsFor(activeDub, se, ep) }.getOrDefault(emptyList())
+            captionsLoading = false
+        }
     }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(value: Boolean) {
                 isPlaying = value
+                controlsVisible = true
             }
 
             override fun onPlaybackStateChanged(state: Int) {
@@ -352,11 +366,10 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
         }
     }
 
-    LaunchedEffect(controlsVisible, isPlaying, locked) {
-        if (controlsVisible && isPlaying && !locked) {
-            delay(4000)
+    LaunchedEffect(controlsVisible, isPlaying, locked, menu) {
+        if (controlsVisible && isPlaying && !locked && menu == 0) {
+            delay(6000)
             controlsVisible = false
-            menu = 0
         }
     }
 
@@ -371,6 +384,11 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
     }
 
     LaunchedEffect(fullscreen) {
+        // Rotation must never leave the player without controls: force them back on both
+        // entering and leaving fullscreen. The gesture layer is keyed on `fullscreen` too.
+        controlsVisible = true
+        menu = 0
+        boosting = false
         activity?.requestedOrientation = if (fullscreen) {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
@@ -508,77 +526,69 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // tap = chrome, double tap = ±10s
+            // One surface owns playback gestures: tap = chrome, double tap = ±10s,
+            // hold = 2x, horizontal drag = seek, vertical drag = brightness / volume.
+            // `requireUnconsumed` keeps button taps from also toggling the chrome.
             Box(
-                Modifier.fillMaxSize().pointerInput(locked) {
-                    detectTapGestures(
-                        onPress = {
-                            if (locked) return@detectTapGestures
-                            tryAwaitRelease()
-                            // long-press boost ends on finger up
-                            if (boosting) {
-                                boosting = false
-                                player.setPlaybackSpeed(speed)
-                                gestureHint = null
-                            }
-                        },
-                        onLongPress = {
-                            if (locked) return@detectTapGestures
-                            boosting = true
-                            player.setPlaybackSpeed(2f)
-                            gestureHint = "2x speed"
-                        },
-                        onTap = {
-                            if (locked) return@detectTapGestures
-                            if (boosting) {
-                                // release already handled the speed reset
-                            } else if (menu != 0) menu = 0 else controlsVisible = !controlsVisible
-                        },
-                        onDoubleTap = { off ->
-                            if (locked) return@detectTapGestures
-                            if (off.x < size.width / 2f) seekBy(-10_000) else seekBy(10_000)
-                        },
-                    )
-                }
-            )
-
-            // horizontal = seek, left/right vertical = brightness / volume
-            Box(
-                Modifier.fillMaxSize().pointerInput(locked) {
+                Modifier.fillMaxSize().pointerInput(locked, fullscreen) {
                     if (locked) return@pointerInput
-                    var dx = 0f
-                    var dy = 0f
-                    var startBrightness = 0.5f
-                    var startVolume = 0
-                    val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                    detectDragGestures(
-                        onDragStart = { o ->
-                            dx = 0f
-                            dy = 0f
-                            dragMode = 0
-                            startPos = player.currentPosition.coerceAtLeast(0)
-                            previewMs = startPos
-                            activity?.window?.attributes?.let { startBrightness = it.screenBrightness.takeIf { b -> b >= 0f } ?: 0.5f }
-                            startVolume = am?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
-                            gestureHint = null
-                        },
-                        onDrag = { change, drag ->
-                            change.consume()
-                            dx += drag.x
-                            dy += drag.y
-                            if (dragMode == 0 && (kotlin.math.abs(dx) > 22f || kotlin.math.abs(dy) > 22f)) {
-                                dragMode = if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) 1
-                                else if (change.position.x < size.width / 2f) 2 else 3
+                    var lastTapAt = 0L
+                    var pendingTap: Job? = null
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = true)
+                        var lastX = down.position.x
+                        var lastY = down.position.y
+                        var totalX = 0f
+                        var totalY = 0f
+                        var mode = 0 // 0 undecided, 1 seek, 2 brightness, 3 volume
+                        var boosted = false
+                        var startPos = player.currentPosition.coerceAtLeast(0)
+                        var preview = startPos
+                        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                        var startBrightness =
+                            activity?.window?.attributes?.screenBrightness?.takeIf { it >= 0f } ?: 0.5f
+                        val startVolume = am?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
+
+                        val boostJob = scope.launch {
+                            delay(420)
+                            if (mode == 0 && !boosted) {
+                                boosted = true
+                                boosting = true
+                                player.setPlaybackSpeed(2f)
+                                gestureHint = "2x speed"
                             }
-                            when (dragMode) {
+                        }
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed || change.isConsumed) break
+                            val dx = change.position.x - lastX
+                            val dy = change.position.y - lastY
+                            lastX = change.position.x
+                            lastY = change.position.y
+                            totalX += dx
+                            totalY += dy
+                            if (mode == 0 &&
+                                (kotlin.math.abs(totalX) > 22f || kotlin.math.abs(totalY) > 22f)
+                            ) {
+                                boostJob.cancel()
+                                mode = if (kotlin.math.abs(totalX) > kotlin.math.abs(totalY)) 1
+                                else if (down.position.x < size.width / 2f) 2 else 3
+                                startPos = player.currentPosition.coerceAtLeast(0)
+                                preview = startPos
+                            }
+                            if (mode != 0) change.consume()
+                            when (mode) {
                                 1 -> {
                                     val dur = durationMs.coerceAtLeast(1L)
-                                    val delta = (dx / size.width * 120_000L).toLong()
-                                    previewMs = (startPos + delta).coerceIn(0, dur)
-                                    gestureHint = "${fmtTime(previewMs)} / ${fmtTime(dur)}"
+                                    val delta = (totalX / size.width * 120_000L).toLong()
+                                    preview = (startPos + delta).coerceIn(0L, dur)
+                                    gestureHint = "${fmtTime(preview)} / ${fmtTime(dur)}"
                                 }
                                 2 -> {
-                                    val b = (startBrightness - dy / size.height * 1.4f).coerceIn(0.02f, 1f)
+                                    val b = (startBrightness - totalY / size.height * 1.4f)
+                                        .coerceIn(0.02f, 1f)
                                     activity?.window?.let { w ->
                                         w.attributes = w.attributes.apply { screenBrightness = b }
                                     }
@@ -586,25 +596,53 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                                 }
                                 3 -> {
                                     val max = am?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
-                                    val v = (startVolume - dy / size.height * max * 1.2f).toInt().coerceIn(0, max)
+                                    val v = (startVolume - totalY / size.height * max * 1.2f)
+                                        .toInt().coerceIn(0, max)
                                     am?.setStreamVolume(AudioManager.STREAM_MUSIC, v, 0)
                                     gestureHint = "Volume ${(v * 100 / max)}%"
                                 }
                             }
-                        },
-                        onDragEnd = {
-                            if (dragMode == 1) {
-                                player.seekTo(previewMs)
-                                positionMs = previewMs
+                        }
+
+                        boostJob.cancel()
+                        if (boosted) {
+                            boosting = false
+                            player.setPlaybackSpeed(speed)
+                            gestureHint = null
+                        }
+                        when (mode) {
+                            1 -> {
+                                player.seekTo(preview)
+                                positionMs = preview
+                                controlsVisible = true
                             }
-                            dragMode = 0
-                            gestureHint = null
-                        },
-                        onDragCancel = {
-                            dragMode = 0
-                            gestureHint = null
-                        },
-                    )
+                            2, 3 -> controlsVisible = true
+                            else -> {
+                                if (!boosted) {
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastTapAt < 320) {
+                                        pendingTap?.cancel()
+                                        lastTapAt = 0L
+                                        seekBy(if (down.position.x < size.width / 2f) -10_000 else 10_000)
+                                    } else {
+                                        lastTapAt = now
+                                        pendingTap?.cancel()
+                                        pendingTap = scope.launch {
+                                            delay(260)
+                                            if (menu != 0) {
+                                                menu = 0
+                                                controlsVisible = true
+                                            } else {
+                                                controlsVisible = !controlsVisible
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        dragMode = 0
+                        gestureHint = null
+                    }
                 }
             )
 
@@ -733,6 +771,17 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                         )
                     }
                     Box(
+                        Modifier.size(32.dp).clickable { enterPip() },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ls_ic_player_pip),
+                            contentDescription = "Picture in picture",
+                            tint = Color.White,
+                            modifier = Modifier.size(17.dp),
+                        )
+                    }
+                    Box(
                         Modifier.size(32.dp).clickable {
                             fullscreen = !fullscreen
                             controlsVisible = true
@@ -840,29 +889,30 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                         .background(Brush.verticalGradient(listOf(Color(0x00000000), Color(0xE6000000))))
                         .padding(start = 10.dp, end = 10.dp, top = 34.dp, bottom = 6.dp),
                 ) {
-                    val dur = durationMs.coerceAtLeast(1L)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(fmtTime(if (seeking) seekValue.toLong() else positionMs), color = Color.White, fontSize = 9.sp)
-                        Slider(
-                            value = (if (seeking) seekValue else positionMs.toFloat()).coerceIn(0f, dur.toFloat()),
-                            onValueChange = {
-                                seeking = true
-                                seekValue = it
+                    Column {
+                        SeekBar(
+                            position = positionMs,
+                            duration = durationMs,
+                            onSeek = { target ->
+                                player.seekTo(target)
+                                positionMs = target
+                                controlsVisible = true
                             },
-                            onValueChangeFinished = {
-                                player.seekTo(seekValue.toLong())
-                                positionMs = seekValue.toLong()
-                                seeking = false
-                            },
-                            valueRange = 0f..dur.toFloat(),
-                            colors = SliderDefaults.colors(
-                                thumbColor = Accent,
-                                activeTrackColor = Accent,
-                                inactiveTrackColor = Color(0x55FFFFFF),
-                            ),
-                            modifier = Modifier.weight(1f).padding(horizontal = 6.dp),
+                            modifier = Modifier.fillMaxWidth(),
                         )
-                        Text(fmtTime(durationMs), color = Color.White, fontSize = 9.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                fmtTime(positionMs),
+                                color = Color.White,
+                                fontSize = 10.sp,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                fmtTime(durationMs),
+                                color = Color(0xB3FFFFFF),
+                                fontSize = 10.sp,
+                            )
+                        }
                     }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -903,8 +953,8 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                         }
                         Spacer(Modifier.weight(1f))
                         Text(
-                            "1.0x".replace("1.0", if (speed == 1f) "1" else speed.toString()),
-                            color = Color.White,
+                            if (speed == 1f) "1x" else "${speed}x",
+                            color = if (speed == 1f) Color.White else AccentSoft,
                             fontSize = 10.sp,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(4.dp))
@@ -984,7 +1034,11 @@ fun WatchScreen(spec: PlaySpec, onBack: () -> Unit, onOpen: (Subject) -> Unit) {
                         captions.forEach { c ->
                             PanelLine(c.name.ifBlank { c.lang }, c.lang, caption?.id == c.id) { applyCaption(c) }
                         }
-                        if (captions.isEmpty()) PanelLine("No subtitle track", "", false) {}
+                        if (captionsLoading) {
+                            PanelLine("Loading tracks…", "", false) {}
+                        } else if (captions.isEmpty()) {
+                            PanelLine("No subtitle track", "", false) {}
+                        }
                     }
                     6 -> PanelOverlay("Screen", Alignment.BottomEnd) {
                         SCALES.forEachIndexed { i, name ->
@@ -1625,5 +1679,65 @@ private fun EpisodeLine(ep: Int, active: Boolean, onPlay: () -> Unit, onDownload
                 modifier = Modifier.size(11.dp),
             )
         }
+    }
+}
+
+/** Thin brand seek bar with a draggable handle, matching the stock player instead of Material's slider. */
+@Composable
+private fun SeekBar(
+    position: Long,
+    duration: Long,
+    onSeek: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val dur = duration.coerceAtLeast(1L)
+    var dragging by remember { mutableStateOf(false) }
+    var dragFrac by remember { mutableStateOf(0f) }
+    val frac = if (dragging) dragFrac else (position.toFloat() / dur).coerceIn(0f, 1f)
+
+    Canvas(
+        modifier
+            .height(26.dp)
+            .pointerInput(dur) {
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    dragging = true
+                    dragFrac = (down.position.x / size.width).coerceIn(0f, 1f)
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (!change.pressed) break
+                        if (change.position.x != down.position.x) {
+                            change.consume()
+                            dragFrac = (change.position.x / size.width).coerceIn(0f, 1f)
+                        }
+                    }
+                    onSeek((dragFrac * dur).toLong())
+                    dragging = false
+                }
+            },
+    ) {
+        val cy = size.height / 2f
+        val track = 3.dp.toPx()
+        val radius = track / 2f
+        drawRoundRect(
+            color = Color(0x3DFFFFFF),
+            topLeft = Offset(0f, cy - radius),
+            size = Size(size.width, track),
+            cornerRadius = CornerRadius(radius, radius),
+        )
+        if (frac > 0f) {
+            drawRoundRect(
+                color = Accent,
+                topLeft = Offset(0f, cy - radius),
+                size = Size(size.width * frac, track),
+                cornerRadius = CornerRadius(radius, radius),
+            )
+        }
+        drawCircle(
+            color = if (dragging) AccentSoft else Color.White,
+            radius = if (dragging) 6.dp.toPx() else 4.5.dp.toPx(),
+            center = Offset(size.width * frac, cy),
+        )
     }
 }

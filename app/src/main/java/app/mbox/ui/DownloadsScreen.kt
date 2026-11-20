@@ -167,6 +167,7 @@ fun DownloadsScreen(onOpen: (PlaySpec) -> Unit) {
                                 t.status == "failed" -> "Failed · tap Retry"
                                 t.status == "paused" -> "Paused · ${fmtBytes(t.done)} of ${fmtBytes(t.total)}"
                                 t.status == "canceled" -> "Canceled"
+                                t.status == "queued" -> "Queued · waiting for a free slot"
                                 else -> "${fmtBytes(t.done)} / ${fmtBytes(t.total)}"
                             },
                             color = TextDim,

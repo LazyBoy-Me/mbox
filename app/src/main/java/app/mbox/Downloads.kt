@@ -81,6 +81,11 @@ object Downloads {
     private val jobs = HashMap<String, Job>()
     private val paused = HashSet<String>()
 
+    // Starting 20 episode downloads at once starves playback and scrolling: keep three in flight.
+    private const val MAX_ACTIVE = 3
+    private val waiters = ArrayDeque<String>()
+    private val waiterStreams = HashMap<String, StreamRes>()
+
     private val _tasks = MutableStateFlow<List<Task>>(emptyList())
     val tasks: StateFlow<List<Task>> = _tasks.asStateFlow()
 
@@ -108,7 +113,7 @@ object Downloads {
         stream: StreamRes,
     ) {
         val existing = find(key)
-        if (existing != null && (existing.running || existing.finished)) return
+        if (existing != null && (existing.status == RUNNING || existing.finished)) return
         val file = File(folder(ctx), safeName("$title $subtitle") + ".mp4")
         // A paused/failed task continues from the bytes already on disk.
         val offset = if (existing != null && file.exists()) file.length() else 0L
@@ -125,6 +130,13 @@ object Downloads {
             status = RUNNING,
         )
         _tasks.update { list -> list.filterNot { it.id == key } + task }
+
+        if (jobs.size >= MAX_ACTIVE) {
+            update(key) { it.copy(status = "queued") }
+            if (!waiters.contains(key)) waiters.add(key)
+            waiterStreams[key] = stream
+            return
+        }
 
         jobs[key] = scope.launch {
             var lastBytes = 0L
@@ -178,7 +190,19 @@ object Downloads {
                 update(key) { it.copy(status = FAILED, speed = 0L) }
             } finally {
                 jobs.remove(key)
+                pump(ctx)
             }
+        }
+    }
+
+    /** Launch queued tasks as soon as a slot frees up. */
+    private fun pump(ctx: Context) {
+        while (jobs.size < MAX_ACTIVE) {
+            val key = if (waiters.isEmpty()) return else waiters.removeFirst()
+            val t = find(key) ?: continue
+            val stream = waiterStreams.remove(key) ?: continue
+            if (t.finished || t.status == CANCELED || t.status == PAUSED) continue
+            start(ctx, key, t.title, t.subtitle, stream)
         }
     }
 
@@ -208,18 +232,24 @@ object Downloads {
     fun pause(key: String) {
         val task = find(key) ?: return
         if (task.finished) return
+        waiters.remove(key)
+        waiterStreams.remove(key)
         paused.add(key)
         jobs[key]?.cancel()
         update(key) { it.copy(status = PAUSED, speed = 0L) }
     }
 
     fun cancel(key: String) {
+        waiters.remove(key)
+        waiterStreams.remove(key)
         jobs.remove(key)?.cancel()
         update(key) { it.copy(status = CANCELED, speed = 0L) }
     }
 
     fun remove(ctx: Context, key: String) {
         cancel(key)
+        waiters.remove(key)
+        waiterStreams.remove(key)
         find(key)?.let { runCatching { File(it.path).delete() } }
         _tasks.update { list -> list.filterNot { it.id == key } }
     }
