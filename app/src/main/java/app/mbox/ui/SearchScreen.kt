@@ -32,6 +32,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,23 +62,35 @@ import kotlinx.coroutines.delay
 
 @Composable
 fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
-    var query by remember { mutableStateOf("") }
-    var submitted by remember { mutableStateOf("") }
-    var tab by remember { mutableStateOf("All") }
-    var tabs by remember { mutableStateOf<List<SearchTab>>(emptyList()) }
-    var groups by remember { mutableStateOf<List<SearchGroup>>(emptyList()) }
+    // Saveable so leaving Search for Home and coming back keeps the query, the chosen tab and
+    // the result list; the cached page below is then already there on the first frame.
+    var query by rememberSaveable { mutableStateOf("") }
+    var submitted by rememberSaveable { mutableStateOf("") }
+    var tab by rememberSaveable { mutableStateOf("All") }
+    var tabs by remember {
+        mutableStateOf(
+            if (submitted.isBlank()) emptyList()
+            else Api.cachedSearchV2(submitted, tab)?.tabs.orEmpty()
+        )
+    }
+    var groups by remember {
+        mutableStateOf(
+            if (submitted.isBlank()) emptyList()
+            else Api.cachedSearchV2(submitted, tab)?.groups.orEmpty()
+        )
+    }
     var loading by remember { mutableStateOf(false) }
     var live by remember { mutableStateOf<List<String>>(emptyList()) }
     var liveSubjects by remember { mutableStateOf<List<Subject>>(emptyList()) }
     var browseAll by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(Store.searchHistory()) }
 
-    // landing content
-    var hotSections by remember { mutableStateOf<List<HotSection>>(emptyList()) }
-    var hotWords by remember { mutableStateOf<List<String>>(emptyList()) }
+    // landing content, seeded from the cache so revisiting the tab draws instantly
+    var hotSections by remember { mutableStateOf(Api.cachedSearchRank()?.sections.orEmpty()) }
+    var hotWords by remember { mutableStateOf(Api.cachedSearchRank()?.words.orEmpty()) }
 
     // filters
-    var options by remember { mutableStateOf(FilterOptions()) }
+    var options by remember { mutableStateOf(Api.cachedFilterOptions() ?: FilterOptions()) }
     var showFilter by remember { mutableStateOf(false) }
     var browsing by remember { mutableStateOf(false) }
     var fGenre by remember { mutableStateOf("") }
@@ -90,10 +103,14 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
     val focus = LocalFocusManager.current
 
     LaunchedEffect(Unit) {
-        val rank = runCatching { Api.searchRank() }.getOrNull()
-        hotSections = rank?.sections.orEmpty()
-        hotWords = rank?.words.orEmpty()
-        options = runCatching { Api.filterOptions() }.getOrDefault(FilterOptions())
+        if (hotSections.isEmpty() && hotWords.isEmpty()) {
+            val rank = runCatching { Api.searchRank() }.getOrNull()
+            hotSections = rank?.sections.orEmpty()
+            hotWords = rank?.words.orEmpty()
+        }
+        if (options.genres.isEmpty()) {
+            options = runCatching { Api.filterOptions() }.getOrDefault(FilterOptions())
+        }
     }
 
     LaunchedEffect(query) {
@@ -111,7 +128,13 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
 
     LaunchedEffect(submitted, tab) {
         if (submitted.isBlank()) return@LaunchedEffect
-        loading = true
+        Api.cachedSearchV2(submitted, tab)?.let { page ->
+            tabs = page.tabs
+            groups = page.groups
+            loading = false
+            return@LaunchedEffect
+        }
+        loading = groups.isEmpty()
         val page = runCatching { Api.searchV2(submitted, tab) }.getOrNull()
         tabs = page?.tabs.orEmpty()
         groups = page?.groups.orEmpty()
@@ -120,7 +143,13 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
 
     LaunchedEffect(browsing, fGenre, fCountry, fYear, fSort) {
         if (!browsing) return@LaunchedEffect
-        loading = true
+        val cached = Api.cachedFiltered(0, fGenre, fCountry, fYear, fSort)
+        if (cached != null) {
+            browseItems = cached
+            loading = false
+            return@LaunchedEffect
+        }
+        loading = browseItems.isEmpty()
         browseItems = runCatching {
             Api.filtered(0, fGenre, fCountry, fYear, fSort)
         }.getOrDefault(emptyList())

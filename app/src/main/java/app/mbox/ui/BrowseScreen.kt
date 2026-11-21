@@ -26,6 +26,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,24 +52,36 @@ fun BrowseScreen(
     onOpen: (Subject) -> Unit,
     startGenre: String = "",
 ) {
-    var options by remember { mutableStateOf(FilterOptions()) }
-    var genre by remember { mutableStateOf(startGenre) }
-    var country by remember { mutableStateOf("") }
-    var year by remember { mutableStateOf("") }
-    var sort by remember { mutableStateOf("") }
-    var items by remember { mutableStateOf<List<Subject>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
+    var options by remember { mutableStateOf(Api.cachedFilterOptions() ?: FilterOptions()) }
+    var genre by rememberSaveable { mutableStateOf(startGenre) }
+    var country by rememberSaveable { mutableStateOf("") }
+    var year by rememberSaveable { mutableStateOf("") }
+    var sort by rememberSaveable { mutableStateOf("") }
+    var items by remember {
+        mutableStateOf(Api.cachedFiltered(0, genre, country, year, sort).orEmpty())
+    }
+    var loading by remember { mutableStateOf(items.isEmpty()) }
     var page by remember { mutableStateOf(1) }
     var more by remember { mutableStateOf(false) }
     var showFilter by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
-        options = runCatching { Api.filterOptions() }.getOrDefault(FilterOptions())
+        if (options.genres.isEmpty()) {
+            options = runCatching { Api.filterOptions() }.getOrDefault(FilterOptions())
+        }
     }
 
     LaunchedEffect(genre, country, year, sort) {
-        loading = true
+        val cached = Api.cachedFiltered(0, genre, country, year, sort, 1)
+        if (cached != null) {
+            page = 1
+            items = cached
+            more = cached.size >= 30
+            loading = false
+            return@LaunchedEffect
+        }
+        loading = items.isEmpty()
         page = 1
         items = runCatching {
             Api.filtered(subjectType = 0, genre = genre, country = country, year = year, sort = sort, page = 1)

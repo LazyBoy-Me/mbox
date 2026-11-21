@@ -44,21 +44,31 @@ import app.mbox.Subject
  */
 @Composable
 fun RankScreen(onBack: () -> Unit, onOpen: (Subject) -> Unit) {
-    var boards by remember { mutableStateOf<List<RankBoard>>(emptyList()) }
-    var board by remember { mutableStateOf<RankBoard?>(null) }
-    var items by remember { mutableStateOf<List<Subject>>(emptyList()) }
-    var loading by remember { mutableStateOf(true) }
+    var boards by remember { mutableStateOf(Api.cachedRankBoards().orEmpty()) }
+    var board by remember { mutableStateOf(boards.firstOrNull()) }
+    var items by remember {
+        mutableStateOf(board?.let { Api.cachedRankSubjects(it.id).orEmpty() }.orEmpty())
+    }
+    var loading by remember { mutableStateOf(boards.isEmpty()) }
 
     LaunchedEffect(Unit) {
-        val list = runCatching { Api.rankBoards() }.getOrDefault(emptyList())
-        boards = list
-        board = list.firstOrNull()
+        if (boards.isEmpty()) {
+            val list = runCatching { Api.rankBoards() }.getOrDefault(emptyList())
+            boards = list
+            board = list.firstOrNull()
+        }
         loading = false
     }
 
     LaunchedEffect(board?.id) {
         val b = board ?: return@LaunchedEffect
-        loading = true
+        val cached = Api.cachedRankSubjects(b.id)
+        if (cached != null) {
+            items = cached
+            loading = false
+            return@LaunchedEffect
+        }
+        loading = items.isEmpty()
         items = runCatching { Api.rankSubjects(b.id) }.getOrDefault(emptyList())
         loading = false
     }

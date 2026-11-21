@@ -29,6 +29,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,25 +57,36 @@ fun HomeScreen(
     onSearch: () -> Unit,
     onDownloads: () -> Unit,
 ) {
-    var sections by remember { mutableStateOf<List<HotSection>>(emptyList()) }
-    var genres by remember { mutableStateOf<List<String>>(emptyList()) }
-    var category by remember { mutableStateOf("All") }
-    var genreItems by remember { mutableStateOf<List<Subject>>(emptyList()) }
+    // Seed from Api's in-memory cache: returning to Home after Search or the player is instant
+    // and costs no request, which is the whole point of keeping the response cache.
+    var sections by remember { mutableStateOf(Api.cachedHotSections().orEmpty()) }
+    var genres by remember { mutableStateOf(Api.cachedFilterOptions()?.genres.orEmpty()) }
+    var category by rememberSaveable { mutableStateOf("All") }
+    var genreItems by remember {
+        mutableStateOf(
+            if (category == "All") emptyList()
+            else Api.cachedFiltered(genre = category).orEmpty()
+        )
+    }
     var genreLoading by remember { mutableStateOf(false) }
-    var loaded by remember { mutableStateOf(false) }
+    var loaded by remember { mutableStateOf(sections.isNotEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(Store.history().take(10)) }
     var showRank by remember { mutableStateOf(false) }
     var showBrowse by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        val hot = runCatching { Api.hotSections() }.getOrNull()
-        if (hot.isNullOrEmpty()) {
-            error = "Couldn't reach MovieBox. Pull the tab again in a moment."
-        } else {
-            sections = hot
+        if (sections.isEmpty()) {
+            val hot = runCatching { Api.hotSections() }.getOrNull()
+            if (hot.isNullOrEmpty()) {
+                error = "Couldn't reach MovieBox. Switch tabs and come back."
+            } else {
+                sections = hot
+            }
         }
-        genres = runCatching { Api.filterOptions().genres }.getOrDefault(emptyList())
+        if (genres.isEmpty()) {
+            genres = runCatching { Api.filterOptions().genres }.getOrDefault(emptyList())
+        }
         history = Store.history().take(10)
         loaded = true
     }
@@ -82,6 +94,13 @@ fun HomeScreen(
     LaunchedEffect(category) {
         if (category == "All") {
             genreItems = emptyList()
+            return@LaunchedEffect
+        }
+        // Chips visited earlier are already in memory; only an unseen genre shows a spinner.
+        val cached = Api.cachedFiltered(genre = category)
+        if (cached != null) {
+            genreItems = cached
+            genreLoading = false
             return@LaunchedEffect
         }
         genreLoading = true

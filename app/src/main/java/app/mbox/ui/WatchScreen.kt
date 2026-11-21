@@ -16,6 +16,7 @@ import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -34,12 +35,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -68,13 +71,17 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -140,7 +147,11 @@ private fun sizeText(bytes: Long): String = when {
 fun WatchScreen(
     spec: PlaySpec,
     inPip: Boolean = false,
-    onBack: () -> Unit,
+    /** Small floating window over the tab host; the same player instance keeps running. */
+    mini: Boolean = false,
+    onMinimize: () -> Unit,
+    onClose: () -> Unit,
+    onExpand: () -> Unit,
     onOpen: (Subject) -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -162,7 +173,6 @@ fun WatchScreen(
     var expanded by remember { mutableStateOf(false) }
     var showInfo by remember { mutableStateOf(false) }
     var toast by remember { mutableStateOf<String?>(null) }
-    var showSeasonMenu by remember { mutableStateOf(false) }
     var showEpisodes by remember { mutableStateOf(false) }
     var person by remember { mutableStateOf<Staff?>(null) }
 
@@ -484,12 +494,32 @@ fun WatchScreen(
         }
     }
 
-    BackHandler {
+    // Back inside the player never jumps straight to Home:
+    //   start / popup / exit fullscreen first, then shrink to the floating mini player.
+    // In mini mode there is deliberately no handler, so the phone's back button navigates the
+    // browsing pages underneath while the video keeps playing.
+    BackHandler(enabled = !mini) {
         when {
             locked -> locked = false
             menu != 0 -> menu = 0
             fullscreen -> fullscreen = false
-            else -> onBack()
+            else -> onMinimize()
+        }
+    }
+
+    // Nothing modal may sit on top of the browsing pages while the mini window is up.
+    LaunchedEffect(mini) {
+        if (mini) {
+            menu = 0
+            locked = false
+            controlsVisible = true
+            showInfo = false
+            showEpisodes = false
+            sheet = emptyList()
+            person = null
+            resumeAsk = null
+        } else {
+            controlsVisible = true
         }
     }
 
@@ -622,15 +652,19 @@ fun WatchScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
+    // A custom Layout keeps ONE video node (and therefore one PlayerView/surface) for all three
+    // shapes: top-of-page 16:9, fullscreen, and the small floating window. Rebuilding the tree
+    // for mini mode would detach the surface and flash black.
+    val density = LocalDensity.current
+    val miniWidthPx = with(density) { 200.dp.roundToPx() }
+    val miniBottomPx = with(density) { 74.dp.roundToPx() }
+    Layout(
+        modifier = Modifier.fillMaxSize().then(if (mini) Modifier else Modifier.background(Bg)),
+        content = {
         // ------------------------------------------------------------------ video
         Box(
             Modifier
                 .fillMaxWidth()
-                .then(
-                    if (fullscreen || inPip) Modifier.weight(1f)
-                    else Modifier.aspectRatio(16f / 9f)
-                )
                 .background(Color.Black),
         ) {
             AndroidView(
@@ -653,7 +687,7 @@ fun WatchScreen(
             // One surface owns playback gestures: tap = chrome, double tap = ±10s,
             // hold = 2x, horizontal drag = seek, vertical drag = brightness / volume.
             // `requireUnconsumed` keeps button taps from also toggling the chrome.
-            if (!inPip) Box(
+            if (!inPip && !mini) Box(
                 Modifier.fillMaxSize().pointerInput(locked, fullscreen) {
                     if (locked) return@pointerInput
                     var lastTapAt = 0L
@@ -800,7 +834,7 @@ fun WatchScreen(
                 )
             }
 
-            if (locked && !inPip) {
+            if (locked && !inPip && !mini) {
                 Row(
                     Modifier
                         .align(Alignment.CenterStart)
@@ -822,7 +856,7 @@ fun WatchScreen(
                 }
             }
 
-            if (nextIn > 0 && !inPip) {
+            if (nextIn > 0 && !inPip && !mini) {
                 Column(
                     Modifier
                         .align(Alignment.BottomEnd)
@@ -841,7 +875,7 @@ fun WatchScreen(
                 }
             }
 
-            if (controlsVisible && !locked && !inPip) {
+            if (controlsVisible && !locked && !inPip && !mini) {
                 // top bar
                 Row(
                     Modifier
@@ -851,7 +885,11 @@ fun WatchScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
-                        Modifier.size(34.dp).clickable { onBack() },
+                        Modifier.size(34.dp).clickable {
+                            // In fullscreen the arrow only drops back to portrait, exactly like
+                            // the stock player; a second press (or back) shrinks to mini.
+                            if (fullscreen) fullscreen = false else onMinimize()
+                        },
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
@@ -1209,7 +1247,7 @@ fun WatchScreen(
                 }
             }
 
-            error?.let { msg ->
+            if (!mini) error?.let { msg ->
                 Column(
                     Modifier.fillMaxSize().background(Color(0xE6000000)).padding(20.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1232,13 +1270,58 @@ fun WatchScreen(
                     }
                 }
             }
+
+            // Mini window chrome: tap anywhere to go back to the full player, X to stop and
+            // release it. Everything else (controls, gestures, sheets) stays out of the way.
+            if (mini) {
+                Box(Modifier.fillMaxSize().clickable(onClick = onExpand))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(30.dp)
+                        .align(Alignment.BottomCenter)
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0x00000000), Color(0xCC000000))
+                            )
+                        ),
+                )
+                Text(
+                    detail.title.ifBlank { spec.title },
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 8.dp, end = 30.dp, bottom = 6.dp),
+                )
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xB3000000))
+                        .clickable(onClick = onClose),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ls_ic_close_20),
+                        contentDescription = "Close mini player",
+                        tint = Color.White,
+                        modifier = Modifier.size(13.dp),
+                    )
+                }
+            }
         }
 
         // ------------------------------------------------------------------ details
-        if (!fullscreen && !inPip) {
+        if (!fullscreen && !inPip && !mini) {
             Column(
                 Modifier
-                    .weight(1f)
+                    .fillMaxSize()
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp),
             ) {
@@ -1367,27 +1450,20 @@ fun WatchScreen(
                     Spacer(Modifier.height(10.dp))
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (spec.series && seasons.isNotEmpty()) {
-                        DropDown("Season " + "%02d".format(se)) { showSeasonMenu = !showSeasonMenu }
-                    }
-                    DropDown("${maxEp.coerceAtLeast(1)} episodes") { showEpisodes = true }
-                }
-                if (showSeasonMenu && seasons.isNotEmpty()) {
-                    MenuBlock {
-                        seasons.forEach { s ->
-                            MenuLine("Season " + "%02d".format(s.se), s.se == se) {
-                                se = s.se
-                                ep = 1
-                                pendingSeek = 0L
-                                showSeasonMenu = false
-                            }
-                        }
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
-
                 if (spec.series) {
+                    // Two outlined pills exactly like fragment_episode.xml: the season picker
+                    // and the episode picker. Both open the official-style "All Episodes" sheet.
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (seasons.isNotEmpty()) {
+                            DropDown("Season " + "%02d".format(se)) { showEpisodes = true }
+                        }
+                        DropDown("All Episodes") { showEpisodes = true }
+                    }
+                    Spacer(Modifier.height(10.dp))
+
                     EpisodeChips(maxEp, ep) { target ->
                         if (target > 0) {
                             ep = target
@@ -1467,10 +1543,43 @@ fun WatchScreen(
                 Spacer(Modifier.height(28.dp))
             }
         }
+        },
+    ) { measurables, constraints ->
+        val width = constraints.maxWidth
+        val height = constraints.maxHeight
+        when {
+            mini -> {
+                val w = miniWidthPx.coerceAtMost(width)
+                val h = (w * 9 / 16).coerceAtMost(height)
+                val video = measurables.first().measure(Constraints.fixed(w, h))
+                layout(width, height) {
+                    video.place(
+                        x = (width - w) / 2,
+                        y = (height - h - miniBottomPx).coerceAtLeast(0),
+                    )
+                }
+            }
+
+            fullscreen || inPip -> {
+                val video = measurables.first().measure(Constraints.fixed(width, height))
+                layout(width, height) { video.place(0, 0) }
+            }
+
+            else -> {
+                val videoHeight = width * 9 / 16
+                val video = measurables.first().measure(Constraints.fixed(width, videoHeight))
+                val details = measurables.getOrNull(1)
+                    ?.measure(Constraints.fixed(width, (height - videoHeight).coerceAtLeast(0)))
+                layout(width, height) {
+                    video.place(0, 0)
+                    details?.place(0, videoHeight)
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ person sheet
-    person?.let { p ->
+    if (!mini) person?.let { p ->
         StaffSheet(
             staff = p,
             onDismiss = { person = null },
@@ -1482,7 +1591,7 @@ fun WatchScreen(
     }
 
     // ------------------------------------------------------------------ detail page
-    if (showInfo) {
+    if (showInfo && !mini) {
         DetailPage(
             subject = detail,
             seasonCount = seasons.size,
@@ -1501,7 +1610,7 @@ fun WatchScreen(
     }
 
     // ------------------------------------------------------------------ resume prompt
-    resumeAsk?.let { saved ->
+    if (!mini) resumeAsk?.let { saved ->
         androidx.compose.ui.window.Dialog(onDismissRequest = { resumeAsk = null }) {
             Column(
                 Modifier
@@ -1537,91 +1646,141 @@ fun WatchScreen(
     }
 
     // ------------------------------------------------------------------ episode sheet
-    if (showEpisodes) {
-        val watched = remember {
+    //
+    // Rebuilt from dialog_episode_list.xml + item_video_detail_episode.xml: bottom sheet with an
+    // 8dp top radius, 18sp bold title, close button, hairline divider, scrollable season tabs
+    // (green selected text) and 44dp square episode tiles. Selected = blue→green 20% gradient,
+    // normal = white 10%; radius 4dp throughout.
+    if (showEpisodes && !mini) {
+        val watched = remember(se, detail.id) {
             Store.history().filter { it.id == detail.id && it.se == se }.associateBy { it.ep }
         }
-        androidx.compose.ui.window.Dialog(onDismissRequest = { showEpisodes = false }) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF17191E))
-                    .padding(14.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Season " + "%02d".format(se),
-                        color = TextMain,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text("${maxEp.coerceAtLeast(1)} episodes", color = TextMute, fontSize = 11.sp)
-                }
-                Spacer(Modifier.height(10.dp))
-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                    items(maxEp) { i ->
-                        val e = i + 1
-                        val seen = watched[e]
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(if (e == ep) Color(0xFF11221A) else Surface1)
-                                .clickable {
-                                    ep = e
-                                    pendingSeek = 0L
-                                    showEpisodes = false
-                                }
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
+        val seasonRow = androidx.compose.foundation.lazy.rememberLazyListState()
+        LaunchedEffect(se) {
+            val index = seasons.indexOfFirst { it.se == se }
+            if (index >= 0) seasonRow.animateScrollToItem(index)
+        }
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = { showEpisodes = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                        .background(Color(0xFF383A40))
+                        .navigationBarsPadding(),
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 6.dp, top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
                             Text(
-                                "%02d".format(e),
-                                color = if (e == ep) AccentSoft else TextDim,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.width(28.dp),
+                                "All Episodes",
+                                color = TextMain,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Bold,
                             )
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    "Episode $e",
-                                    color = if (e == ep) AccentSoft else TextMain,
-                                    fontSize = 12.sp,
-                                )
-                                Text(
-                                    when {
-                                        e == ep -> "Now playing"
-                                        seen != null -> "Watched · ${(seen.progress * 100).toInt()}%"
-                                        else -> "Tap to play"
-                                    },
-                                    color = TextMute,
-                                    fontSize = 9.sp,
-                                )
+                            Text(
+                                (detail.title.ifBlank { spec.title }) +
+                                    if (spec.series) "  ·  Season ${"%02d".format(se)}" else "",
+                                color = TextMute,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Box(
+                            Modifier
+                                .size(44.dp)
+                                .clickable { showEpisodes = false },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ls_ic_close_20),
+                                contentDescription = "Close",
+                                tint = Color(0xCCFFFFFF),
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Box(Modifier.fillMaxWidth().height(0.5.dp).background(Color(0x1AFFFFFF)))
+
+                    if (seasons.size > 1) {
+                        LazyRow(
+                            state = seasonRow,
+                            contentPadding = PaddingValues(horizontal = 6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            items(seasons.size) { i ->
+                                val season = seasons[i]
+                                val active = season.se == se
+                                Column(
+                                    Modifier
+                                        .clickable {
+                                            if (season.se != se) {
+                                                se = season.se
+                                                ep = 1
+                                                pendingSeek = 0L
+                                            }
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Text(
+                                        "Season ${season.se}",
+                                        color = if (active) AccentSoft else Color(0xCCFFFFFF),
+                                        fontSize = 14.sp,
+                                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                                    )
+                                    Spacer(Modifier.height(7.dp))
+                                    Box(
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .height(2.dp)
+                                            .background(if (active) Accent else Color.Transparent)
+                                    )
+                                }
                             }
+                        }
+                        Box(Modifier.fillMaxWidth().height(0.5.dp).background(Color(0x1AFFFFFF)))
+                    }
+
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(6),
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                        contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 24.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        items(maxEp) { i ->
+                            val e = i + 1
+                            val active = e == ep
+                            val seen = watched[e]
                             Box(
                                 Modifier
-                                    .size(28.dp)
-                                    .clip(RoundedCornerShape(5.dp))
-                                    .background(Surface2)
-                                    .clickable { loadQualities(e) },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_movie_download),
-                                    contentDescription = "Download episode $e",
-                                    tint = AccentSoft,
-                                    modifier = Modifier.size(14.dp),
-                                )
-                            }
-                            Spacer(Modifier.width(6.dp))
-                            Box(
-                                Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .background(Accent)
+                                    .fillMaxWidth()
+                                    .height(44.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .then(
+                                        if (active) {
+                                            Modifier
+                                                .background(
+                                                    Brush.horizontalGradient(
+                                                        listOf(Color(0x401CB7FF), Color(0x402FF58B))
+                                                    )
+                                                )
+                                                .border(1.dp, Color(0x662FF58B), RoundedCornerShape(4.dp))
+                                        } else {
+                                            Modifier.background(Color(0x1AFFFFFF))
+                                        }
+                                    )
                                     .clickable {
                                         ep = e
                                         pendingSeek = 0L
@@ -1629,12 +1788,39 @@ fun WatchScreen(
                                     },
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_player_play),
-                                    contentDescription = "Play episode $e",
-                                    tint = Color.Black,
-                                    modifier = Modifier.size(11.dp),
+                                Text(
+                                    "%02d".format(e),
+                                    color = if (active) AccentSoft else Color(0xCCFFFFFF),
+                                    fontSize = 12.sp,
+                                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                                 )
+                                if (seen != null && !active) {
+                                    Box(
+                                        Modifier
+                                            .align(Alignment.BottomCenter)
+                                            .padding(bottom = 3.dp)
+                                            .size(3.dp)
+                                            .clip(CircleShape)
+                                            .background(AccentSoft)
+                                    )
+                                }
+                                // Per-episode download, the small icon the stock tile puts in
+                                // its top-right corner.
+                                Box(
+                                    Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(2.dp)
+                                        .size(14.dp)
+                                        .clickable { loadQualities(e) },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_movie_download),
+                                        contentDescription = "Download episode $e",
+                                        tint = if (active) AccentSoft else Color(0x99FFFFFF),
+                                        modifier = Modifier.size(9.dp),
+                                    )
+                                }
                             }
                         }
                     }
@@ -1644,7 +1830,7 @@ fun WatchScreen(
     }
 
     // ------------------------------------------------------------------ download sheet
-    if (sheet.isNotEmpty() || sheetLoading) {
+    if (!mini && (sheet.isNotEmpty() || sheetLoading)) {
         androidx.compose.ui.window.Dialog(onDismissRequest = { if (!sheetLoading) sheet = emptyList() }) {
             Column(
                 Modifier
@@ -1830,51 +2016,26 @@ private fun LangChip(text: String, selected: Boolean, onClick: () -> Unit) {
     )
 }
 
+/** 32dp outlined dropdown pill from item_layout style: radius 4, white 20% stroke, 12sp. */
 @Composable
 private fun DropDown(label: String, onClick: () -> Unit) {
     Row(
         Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(Surface1)
+            .height(32.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(4.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = TextDim, fontSize = 11.sp)
-        Spacer(Modifier.width(5.dp))
+        Text(label, color = Color(0xCCFFFFFF), fontSize = 12.sp)
+        Spacer(Modifier.width(4.dp))
         Icon(
             painter = painterResource(R.drawable.ic_arrow_down),
             contentDescription = null,
-            tint = TextMute,
-            modifier = Modifier.size(12.dp),
+            tint = Color(0xCCFFFFFF),
+            modifier = Modifier.size(10.dp),
         )
-    }
-}
-
-@Composable
-private fun MenuBlock(content: @Composable () -> Unit) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(top = 6.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(Surface1)
-            .padding(vertical = 2.dp),
-        content = { content() },
-    )
-}
-
-@Composable
-private fun MenuLine(text: String, selected: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(text, color = if (selected) AccentSoft else TextDim, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        if (selected) Text("✓", color = AccentSoft, fontSize = 11.sp)
     }
 }
 
@@ -1892,18 +2053,32 @@ private fun EpisodeChips(maxEp: Int, selected: Int, onSelect: (Int) -> Unit) {
     ) {
         items(maxEp) { i ->
             val e = i + 1
+            // item_video_detail_episode.xml: 44dp tall, 4dp corners, white 10% normal and a
+            // blue→green 20% gradient when selected.
             Box(
                 Modifier
-                    .size(40.dp, 30.dp)
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(if (selected == e) Color(0xFF10241A) else Surface1)
+                    .size(46.dp, 44.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .then(
+                        if (selected == e) {
+                            Modifier
+                                .background(
+                                    Brush.horizontalGradient(
+                                        listOf(Color(0x401CB7FF), Color(0x402FF58B))
+                                    )
+                                )
+                                .border(1.dp, Color(0x662FF58B), RoundedCornerShape(4.dp))
+                        } else {
+                            Modifier.background(Color(0x1AFFFFFF))
+                        }
+                    )
                     .clickable { onSelect(e) },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     "%02d".format(e),
-                    color = if (selected == e) AccentSoft else TextMute,
-                    fontSize = 11.sp,
+                    color = if (selected == e) AccentSoft else Color(0xCCFFFFFF),
+                    fontSize = 12.sp,
                     fontWeight = if (selected == e) FontWeight.Bold else FontWeight.Normal,
                 )
             }

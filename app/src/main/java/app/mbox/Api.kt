@@ -52,6 +52,68 @@ object Api {
     /** Per-subject web slug (`detailPath`); needed by the h5 player calls. */
     private val slugCache = HashMap<String, String>()
 
+    // ------------------------------------------------------------------ response cache
+    //
+    // Every time a tab or a genre chip is opened the app used to rebuild the whole screen from
+    // the network: two Home requests, one filter-items request, one request per genre. Switching
+    // Home → Search → Home paid for that twice. Catalog data barely changes within a session, so
+    // completed answers are kept in memory with a TTL and screens start from the cached copy.
+    // Only successful, non-empty payloads are stored, which keeps a transient failure from being
+    // remembered as "no results".
+    private class Cached(val at: Long, val value: Any?)
+
+    private val responseCache = java.util.concurrent.ConcurrentHashMap<String, Cached>()
+    private const val CATALOG_TTL = 30 * 60_000L
+    private const val SEARCH_TTL = 10 * 60_000L
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T> peek(key: String, ttlMs: Long = CATALOG_TTL): T? {
+        val hit = responseCache[key] ?: return null
+        if (System.currentTimeMillis() - hit.at > ttlMs) {
+            responseCache.remove(key)
+            return null
+        }
+        return hit.value as? T
+    }
+
+    private suspend fun <T> cached(
+        key: String,
+        ttlMs: Long = CATALOG_TTL,
+        load: suspend () -> T,
+    ): T {
+        peek<T>(key, ttlMs)?.let { return it }
+        val value = load()
+        val keep = when (value) {
+            is Collection<*> -> value.isNotEmpty()
+            is SearchPage -> value.groups.isNotEmpty() || value.tabs.isNotEmpty()
+            is SearchRank -> value.sections.isNotEmpty() || value.words.isNotEmpty()
+            is FilterOptions -> value.genres.isNotEmpty() ||
+                value.countries.isNotEmpty() || value.years.isNotEmpty()
+            else -> true
+        }
+        if (keep) responseCache[key] = Cached(System.currentTimeMillis(), value)
+        return value
+    }
+
+    // Synchronous peeks used to seed screen state before the first frame.
+    fun cachedHotSections(): List<HotSection>? = peek("hot")
+    fun cachedFilterOptions(): FilterOptions? = peek("filters")
+    fun cachedSearchRank(): SearchRank? = peek("search-rank", SEARCH_TTL)
+    fun cachedRankBoards(): List<RankBoard>? = peek("rank-boards")
+    fun cachedRankSubjects(boardId: String, page: Int = 1): List<Subject>? =
+        peek("rank|$boardId|$page")
+    fun cachedSearchV2(keyword: String, tabId: String = "All"): SearchPage? =
+        peek("search|${keyword.trim().lowercase()}|$tabId", SEARCH_TTL)
+
+    fun cachedFiltered(
+        subjectType: Int = 0,
+        genre: String = "",
+        country: String = "",
+        year: String = "",
+        sort: String = "",
+        page: Int = 1,
+    ): List<Subject>? = peek(filterKey(subjectType, genre, country, year, sort, page))
+
     fun webReferer(slug: String): String = "$WEB_ORIGIN/movies/$slug"
 
     private val jsonMedia = CTYPE.toMediaType()
@@ -242,7 +304,8 @@ object Api {
 
     // ---------------------------------------------------------------- endpoints
 
-    suspend fun hotSections(): List<HotSection> = withContext(Dispatchers.IO) {
+    suspend fun hotSections(): List<HotSection> = cached("hot") {
+        withContext(Dispatchers.IO) {
         val data = call("/subject-api/search-rank/v2?host=api6.aoneroom.com")
         val hot = data.optJSONObject("data")?.optJSONArray("hot") ?: return@withContext emptyList()
         val out = ArrayList<HotSection>()
@@ -252,6 +315,7 @@ object Api {
             if (items.isNotEmpty()) out.add(HotSection(sec.optString("name"), items))
         }
         out
+        }
     }
 
     suspend fun trending(page: Int = 1): List<Subject> = withContext(Dispatchers.IO) {
@@ -329,6 +393,7 @@ object Api {
 
     /** Search with the app's own tabs (All / Movie / TV / Music / People) and grouped results. */
     suspend fun searchV2(keyword: String, tabId: String = "All"): SearchPage =
+        cached("search|${keyword.trim().lowercase()}|$tabId", SEARCH_TTL) {
         withContext(Dispatchers.IO) {
             ensureToken()
             val body = JSONObject()
@@ -408,6 +473,7 @@ object Api {
             }
             SearchPage(tabs, groups)
         }
+        }
 
     /** Subtitle tracks for one episode; the endpoint needs resource/post ids from resource/v2. */
     suspend fun captionsFor(subjectId: String, se: Int, ep: Int): List<Caption> =
@@ -434,7 +500,8 @@ object Api {
         }
 
     /** Search landing data: hot boards + "everyone is searching" words. */
-    suspend fun searchRank(): SearchRank = withContext(Dispatchers.IO) {
+    suspend fun searchRank(): SearchRank = cached("search-rank", SEARCH_TTL) {
+        withContext(Dispatchers.IO) {
         ensureToken()
         val data = runCatching {
             call("/subject-api/search-rank/v2?host=api6.aoneroom.com")
@@ -458,10 +525,12 @@ object Api {
             }
         }
         SearchRank(sections, words)
+        }
     }
 
     /** Genre/country/year/sort lists used by the filter sheet. */
-    suspend fun filterOptions(): FilterOptions = withContext(Dispatchers.IO) {
+    suspend fun filterOptions(): FilterOptions = cached("filters") {
+        withContext(Dispatchers.IO) {
         ensureToken()
         val data = runCatching { call("/subject-api/filter-items?host=api6.aoneroom.com") }
             .getOrNull()?.optJSONObject("data") ?: return@withContext FilterOptions()
@@ -486,7 +555,17 @@ object Api {
             }
         }
         FilterOptions(genres, countries, years, sorts)
+        }
     }
+
+    private fun filterKey(
+        subjectType: Int,
+        genre: String,
+        country: String,
+        year: String,
+        sort: String,
+        page: Int,
+    ): String = "filter|$subjectType|$genre|$country|$year|$sort|$page"
 
     /** Browse with filters, straight from the web filter page (same one the site uses). */
     suspend fun filtered(
@@ -496,7 +575,8 @@ object Api {
         year: String = "",
         sort: String = "",
         page: Int = 1,
-    ): List<Subject> = withContext(Dispatchers.IO) {
+    ): List<Subject> = cached(filterKey(subjectType, genre, country, year, sort, page)) {
+        withContext(Dispatchers.IO) {
         val sb = StringBuilder("/filter?subjectType=$subjectType&page=$page&perPage=30")
         if (genre.isNotEmpty()) sb.append("&genre=").append(URLEncoder.encode(genre, "UTF-8"))
         if (country.isNotEmpty()) sb.append("&country=").append(URLEncoder.encode(country, "UTF-8"))
@@ -506,10 +586,12 @@ object Api {
             ?: return@withContext emptyList()
         val holder = data.optJSONObject("subjectList") ?: return@withContext emptyList()
         listOfSubjects(holder.optJSONArray("items"))
+        }
     }
 
     /** Ranking boards ("TOP Movies", "Bollywood", …). */
-    suspend fun rankBoards(): List<RankBoard> = withContext(Dispatchers.IO) {
+    suspend fun rankBoards(): List<RankBoard> = cached("rank-boards") {
+        withContext(Dispatchers.IO) {
         ensureToken()
         val data = runCatching { call("/tab/ranking-list?host=api6.aoneroom.com") }
             .getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
@@ -519,10 +601,12 @@ object Api {
             val id = o.optString("type")
             if (id.isEmpty()) null else RankBoard(id, clean(o.optString("name")))
         }
+        }
     }
 
     /** Titles inside one ranking board. */
     suspend fun rankSubjects(boardId: String, page: Int = 1): List<Subject> =
+        cached("rank|$boardId|$page") {
         withContext(Dispatchers.IO) {
             ensureToken()
             val data = runCatching {
@@ -531,6 +615,7 @@ object Api {
             val arr = data.optJSONArray("subjects") ?: data.optJSONArray("items")
                 ?: data.optJSONArray("subjectList") ?: return@withContext emptyList()
             listOfSubjects(arr)
+        }
         }
 
     /** Filmography of one person (`staff-subject-list`). */
@@ -582,24 +667,29 @@ object Api {
         )
     }
 
-    suspend fun detail(subjectId: String): Subject = withContext(Dispatchers.IO) {
+    suspend fun detail(subjectId: String): Subject = cached("detail|$subjectId") {
+        withContext(Dispatchers.IO) {
         ensureToken()
         val data = call("/subject-api/get?subjectId=$subjectId")
         val o = data.optJSONObject("data") ?: JSONObject()
         subjectOf(o)
+        }
     }
 
-    suspend fun seasons(subjectId: String): List<Season> = withContext(Dispatchers.IO) {
+    suspend fun seasons(subjectId: String): List<Season> = cached("seasons|$subjectId") {
+        withContext(Dispatchers.IO) {
         ensureToken()
         val data = call("/subject-api/season-info/v2?subjectId=$subjectId")
         val arr = data.optJSONObject("data")?.optJSONArray("seasons") ?: return@withContext emptyList()
         (0 until arr.length()).mapNotNull { i ->
             arr.optJSONObject(i)?.let { Season(it.optInt("se"), it.optInt("maxEp")) }
         }
+        }
     }
 
     /** Audio/dub tracks for a subject; each track is a separate subjectId with its own resources. */
-    suspend fun dubs(subjectId: String): List<Dub> = withContext(Dispatchers.IO) {
+    suspend fun dubs(subjectId: String): List<Dub> = cached("dubs|$subjectId") {
+        withContext(Dispatchers.IO) {
         ensureToken()
         val data = call("/subject-api/dub-info?host=api6.aoneroom.com&subjectId=$subjectId")
         val arr = data.optJSONObject("data")?.optJSONArray("dubs") ?: return@withContext emptyList()
@@ -612,6 +702,7 @@ object Api {
                 code = o.optString("lanCode"),
                 original = o.optBoolean("original"),
             )
+        }
         }
     }
 
@@ -748,30 +839,11 @@ object Api {
     }
 
     /** Genre chips exactly as the stock app shows them (Action, Adventure, …). */
-    suspend fun genres(): List<String> = withContext(Dispatchers.IO) {
-        ensureToken()
-        val data = runCatching { call("/subject-api/filter-items?host=api6.aoneroom.com") }
-            .getOrNull()?.optJSONObject("data") ?: return@withContext emptyList()
-        val types = data.optJSONArray("typeList") ?: return@withContext emptyList()
-        for (i in 0 until types.length()) {
-            val items = types.optJSONObject(i)?.optJSONArray("items") ?: continue
-            for (j in 0 until items.length()) {
-                val f = items.optJSONObject(j) ?: continue
-                if (f.optString("filterType") != "genre") continue
-                val vals = f.optJSONArray("filterVals") ?: continue
-                val out = ArrayList<String>()
-                for (k in 0 until vals.length()) {
-                    val v = vals.optString(k)
-                    if (v.isNotEmpty() && v != "All") out.add(v)
-                }
-                if (out.isNotEmpty()) return@withContext out
-            }
-        }
-        emptyList()
-    }
+    suspend fun genres(): List<String> = filterOptions().genres
 
     /** Titles for one genre chip, from the web filter endpoint. */
     suspend fun genreSubjects(genre: String, page: Int = 1): List<Subject> =
+        cached(filterKey(0, genre, "", "", "", page)) {
         withContext(Dispatchers.IO) {
             val path = "/filter?subjectType=0&genre=" + URLEncoder.encode(genre, "UTF-8") +
                 "&page=$page&perPage=30"
@@ -787,9 +859,11 @@ object Api {
             }
             out
         }
+        }
 
     /** "You may also like" strip under the player (h5 recommendation endpoint). */
-    suspend fun recommendations(subjectId: String): List<Subject> = withContext(Dispatchers.IO) {
+    suspend fun recommendations(subjectId: String): List<Subject> = cached("recs|$subjectId") {
+        withContext(Dispatchers.IO) {
         val slug = runCatching { detailPath(subjectId) }.getOrNull().orEmpty()
         val path = "/subject/detail-rec?subjectId=$subjectId" +
             if (slug.isNotEmpty()) "&detailPath=" + URLEncoder.encode(slug, "UTF-8") else ""
@@ -803,10 +877,14 @@ object Api {
             if (sub.optString("subjectId").isNotEmpty()) out.add(subjectOf(sub))
         }
         out
+        }
     }
 
     /** Live search-as-you-type suggestions (words), same endpoint the stock app uses. */
-    suspend fun suggestWords(keyword: String): List<String> = withContext(Dispatchers.IO) {
+    suspend fun suggestWords(keyword: String): List<String> = cached(
+        "suggest|${keyword.trim().lowercase()}", SEARCH_TTL,
+    ) {
+        withContext(Dispatchers.IO) {
         if (keyword.trim().length < 2) return@withContext emptyList()
         ensureToken()
         val q = URLEncoder.encode(keyword.trim(), "UTF-8")
@@ -821,6 +899,7 @@ object Api {
             if (out.size >= 10) break
         }
         out
+        }
     }
 
     /**

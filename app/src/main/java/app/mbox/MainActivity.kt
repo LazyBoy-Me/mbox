@@ -29,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -104,8 +105,11 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
-    var tab by remember { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf(0) }
     var playback by remember { mutableStateOf<PlaySpec?>(null) }
+    // Mini player: the watch screen keeps running over the tab host in a small window. Its player
+    // is never disposed, so audio and buffered data carry on while browsing.
+    var mini by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { Api.ensureToken() }
 
@@ -121,16 +125,16 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
             se = if (series) 1 else 0,
             ep = if (series) 1 else 0,
         )
+        mini = false
         onLinkUsed()
     }
-
-    BackHandler(enabled = playback != null) { playback = null }
 
     val currentPlayback = playback
 
     // Every tap opens the one watch screen: video on top, then audio/season/episode lists.
     // Movies are addressed as se=0&ep=0, series start at season 1 episode 1.
     fun resume(h: HistoryEntry) {
+        mini = false
         playback = PlaySpec(
             baseId = h.id,
             title = h.title,
@@ -142,6 +146,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
     }
 
     fun open(s: Subject) {
+        mini = false
         playback = PlaySpec(
             baseId = s.id,
             title = s.title,
@@ -151,46 +156,55 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
         )
     }
 
-    if (currentPlayback != null) {
-        key(currentPlayback.baseId, currentPlayback.localPath) {
-            WatchScreen(
-                spec = currentPlayback,
-                inPip = inPip,
-                onBack = { playback = null },
-                onOpen = { open(it) },
-            )
+    // The tab host stays composed underneath the player. That single change is why coming back
+    // from a video is instant (no screen rebuild, no requests) and what lets the mini player float
+    // over live pages instead of over a frozen screenshot.
+    Box(Modifier.fillMaxSize().background(Bg)) {
+        Column(Modifier.fillMaxSize()) {
+            Box(Modifier.weight(1f)) {
+                when (tab) {
+                    0 -> HomeScreen(
+                        onOpen = { open(it) },
+                        onResume = { resume(it) },
+                        onSearch = { tab = 1 },
+                        onDownloads = { tab = 2 },
+                    )
+
+                    1 -> SearchScreen(
+                        onOpen = { open(it) },
+                        onBack = { tab = 0 },
+                    )
+
+                    2 -> DownloadsScreen(
+                        onOpen = { mini = false; playback = it },
+                    )
+
+                    else -> MeScreen(
+                        version = "1.8",
+                        onDownloads = { tab = 2 },
+                        onOpen = { open(it) },
+                        onResume = { resume(it) },
+                    )
+                }
+            }
+            BottomBar(tab) { tab = it }
         }
-        return
-    }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
-        Box(Modifier.weight(1f)) {
-            when (tab) {
-                0 -> HomeScreen(
+        if (currentPlayback != null) {
+            key(currentPlayback.baseId, currentPlayback.localPath) {
+                WatchScreen(
+                    spec = currentPlayback,
+                    inPip = inPip,
+                    mini = mini,
+                    onMinimize = { mini = true },
+                    onClose = {
+                        mini = false
+                        playback = null
+                    },
                     onOpen = { open(it) },
-                    onResume = { resume(it) },
-                    onSearch = { tab = 1 },
-                    onDownloads = { tab = 2 },
-                )
-
-                1 -> SearchScreen(
-                    onOpen = { open(it) },
-                    onBack = { tab = 0 },
-                )
-
-                2 -> DownloadsScreen(
-                    onOpen = { playback = it },
-                )
-
-                else -> MeScreen(
-                    version = "1.7",
-                    onDownloads = { tab = 2 },
-                    onOpen = { open(it) },
-                    onResume = { resume(it) },
                 )
             }
         }
-        BottomBar(tab) { tab = it }
     }
 }
 
