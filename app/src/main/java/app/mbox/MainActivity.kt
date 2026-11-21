@@ -197,6 +197,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                     inPip = inPip,
                     mini = mini,
                     onMinimize = { mini = true },
+                    onExpand = { mini = false },
                     onClose = {
                         mini = false
                         playback = null
