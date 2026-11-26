@@ -85,6 +85,9 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
         )
     }
     var loading by remember { mutableStateOf(false) }
+    // Bumped when the user submits the same word again, so the results effect re-runs instead of
+    // leaving the page on the spinner after submit() cleared it.
+    var reload by remember { mutableStateOf(0) }
     var live by remember { mutableStateOf<List<String>>(emptyList()) }
     var liveLoading by remember { mutableStateOf(false) }
     // Every answer ever received this session; typing/backspacing is filtered locally first.
@@ -197,7 +200,7 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(submitted, tab, Store.familyEpoch) {
+    LaunchedEffect(submitted, tab, reload, Store.familyEpoch) {
         if (submitted.isBlank()) return@LaunchedEffect
         Api.cachedSearchV2(submitted, tab)?.let { page ->
             tabs = page.tabs
@@ -240,16 +243,22 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
     fun submit(word: String) {
         val w = word.trim()
         if (w.isEmpty()) return
+        val same = w == submitted.trim()
         query = w
         submitted = w
         browsing = false
         live = emptyList()
         liveSubjects = emptyList()
         liveLoading = false
-        // A new submit must not paint the previous query's hits while the new page loads.
-        groups = emptyList()
-        tabs = emptyList()
-        loading = true
+        // A new submit must not paint the previous query's hits while the new page loads. Pressing
+        // Search twice for the same word keeps the page and just asks again.
+        if (same) {
+            reload++
+        } else {
+            groups = emptyList()
+            tabs = emptyList()
+            loading = true
+        }
         Store.addSearch(w)
         history = Store.searchHistory()
         // Enter on the keyboard (or tapping Search / a suggestion) closes the IME and drops focus.
