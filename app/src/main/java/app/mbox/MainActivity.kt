@@ -107,29 +107,41 @@ class MainActivity : ComponentActivity() {
 
 /**
  * Compose can save a nullable [PlaySpec] across an activity/process recreation, so the mini
- * player is not silently lost when the phone kills the background activity.
+ * player is not silently lost when the phone kills the background activity. The value is a plain
+ * JSON string because a Bundle always accepts strings, while a hand-built ArrayList of mixed
+ * types is the kind of thing that can fail at save time and take the process down.
  */
-private val PlaySpecSaver: Saver<PlaySpec?, ArrayList<Any>> = Saver(
+private val PlaySpecSaver: Saver<PlaySpec?, String> = Saver(
     save = { spec ->
         spec?.let {
-            arrayListOf<Any>(
-                it.baseId, it.title, it.series, it.se, it.ep,
-                it.dubId, it.maxEp, it.localPath, it.startMs,
-            )
+            org.json.JSONObject()
+                .put("baseId", it.baseId)
+                .put("title", it.title)
+                .put("series", it.series)
+                .put("se", it.se)
+                .put("ep", it.ep)
+                .put("dubId", it.dubId)
+                .put("maxEp", it.maxEp)
+                .put("localPath", it.localPath)
+                .put("startMs", it.startMs)
+                .toString()
         }
     },
-    restore = { v ->
-        PlaySpec(
-            baseId = v[0] as String,
-            title = v[1] as String,
-            series = v[2] as Boolean,
-            se = v[3] as Int,
-            ep = v[4] as Int,
-            dubId = v[5] as String,
-            maxEp = v[6] as Int,
-            localPath = v[7] as String,
-            startMs = v[8] as Long,
-        )
+    restore = { raw ->
+        runCatching {
+            val o = org.json.JSONObject(raw)
+            PlaySpec(
+                baseId = o.optString("baseId"),
+                title = o.optString("title"),
+                series = o.optBoolean("series"),
+                se = o.optInt("se"),
+                ep = o.optInt("ep"),
+                dubId = o.optString("dubId"),
+                maxEp = o.optInt("maxEp"),
+                localPath = o.optString("localPath"),
+                startMs = o.optLong("startMs"),
+            )
+        }.getOrNull()
     },
 )
 
@@ -217,10 +229,8 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                 when (tab) {
                     0 -> HomeScreen(
                         onOpen = { open(it) },
-                        onResume = { resume(it) },
                         onSearch = { tab = 1 },
                         onDownloads = { tab = 2 },
-                        onMidnight = { tab = 4 },
                     )
 
                     1 -> SearchScreen(
@@ -233,7 +243,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                     )
 
                     3 -> MeScreen(
-                        version = "1.9",
+                        version = "2.0",
                         onDownloads = { tab = 2 },
                         onOpen = { open(it) },
                         onResume = { resume(it) },

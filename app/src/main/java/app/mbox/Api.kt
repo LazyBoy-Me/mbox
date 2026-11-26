@@ -103,6 +103,7 @@ object Api {
     fun cachedFilterOptions(): FilterOptions? = peek("filters")
     fun cachedSearchRank(): SearchRank? = peek("search-rank", SEARCH_TTL)
     fun cachedRankBoards(): List<RankBoard>? = peek("rank-boards")
+    fun cachedHomeFeed(): HomeFeed? = peek("home-feed")
     fun cachedRankSubjects(boardId: String, page: Int = 1): List<Subject>? =
         peek("rank|$boardId|$page")
     fun cachedSearchV2(keyword: String, tabId: String = "All"): SearchPage? =
@@ -292,8 +293,24 @@ object Api {
             .map { it.trim() }.filter { it.isNotEmpty() },
         trailer = o.optJSONObject("trailer")?.optJSONObject("VideoAddress")?.optString("url").orEmpty(),
         still = o.optJSONObject("stills")?.optString("url").orEmpty(),
-        adult = o.optInt("restrictKid", 0) == 1,
+        adult = adultFlags(o),
     )
+
+    /**
+     * Family Mode has to work on every endpoint, not just the ones that publish `restrictKid`.
+     * Home shelves and search-suggest omit it, but they do carry `isPornographic`/`webHighRisk`
+     * and an explicit Adult/Hentai genre, so all three are treated as 18+.
+     */
+    private fun adultFlags(o: JSONObject): Boolean {
+        if (o.optInt("restrictKid", 0) == 1) return true
+        if (o.optBoolean("isPornographic", false)) return true
+        if (o.optBoolean("webHighRisk", false)) return true
+        return o.optString("genre").split(',').any { g ->
+            val t = g.trim()
+            t.equals("Adult", true) || t.equals("Hentai", true) || t.equals("Porn", true) ||
+                t.equals("Erotic", true)
+        }
+    }
 
     private fun listOfSubjects(arr: org.json.JSONArray?): List<Subject> {
         if (arr == null) return emptyList()
@@ -695,6 +712,90 @@ object Api {
             MidnightPage(items, more)
         }
         }
+
+    /**
+     * The real Home screen. The stock app does not hard-code its rows: `/home?host=…` returns an
+     * ordered `operatingList` of banners, subject shelves and category cards, and the app draws
+     * them in that order. Parsing the same list is what makes our Home look like theirs instead of
+     * our own "Top 10 / Popular / Trending" invention.
+     */
+    suspend fun homeFeed(): HomeFeed = cached("home-feed") {
+        withContext(Dispatchers.IO) {
+            val data = runCatching { h5Catalog("/home?host=moviebox.ph") }
+                .getOrNull()?.optJSONObject("data") ?: return@withContext HomeFeed()
+            val ops = data.optJSONArray("operatingList") ?: return@withContext HomeFeed()
+            val banners = ArrayList<Subject>()
+            val sections = ArrayList<HomeSection>()
+            for (i in 0 until ops.length()) {
+                val op = ops.optJSONObject(i) ?: continue
+                val type = op.optString("type")
+                if (type == "BANNER") {
+                    val arr = op.optJSONObject("banner")?.optJSONArray("items") ?: continue
+                    for (j in 0 until arr.length()) {
+                        val b = arr.optJSONObject(j) ?: continue
+                        val sub = b.optJSONObject("subject") ?: continue
+                        if (sub.optString("subjectId").isEmpty()) continue
+                        val s = subjectOf(sub)
+                        if (Store.familyMode && s.adult) continue
+                        val wide = b.optJSONObject("image")?.optString("url").orEmpty()
+                        banners.add(s.copy(still = wide.ifBlank { s.still }))
+                    }
+                } else if (type == "SUBJECTS_MOVIE" || type == "APPOINTMENT_LIST") {
+                    val arr = op.optJSONArray("subjects") ?: continue
+                    val items = ArrayList<Subject>(arr.length())
+                    for (j in 0 until arr.length()) {
+                        val o = arr.optJSONObject(j) ?: continue
+                        val s = subjectOf(o)
+                        if (s.id.isEmpty()) continue
+                        if (Store.familyMode && s.adult) continue
+                        items.add(s)
+                    }
+                    if (items.isNotEmpty()) {
+                        sections.add(
+                            HomeSection(type, clean(op.optString("title")), items)
+                        )
+                    }
+                } else if (type == "FILTER") {
+                    val arr = op.optJSONArray("filters") ?: continue
+                    val filters = ArrayList<HomeFilter>(arr.length())
+                    for (j in 0 until arr.length()) {
+                        val f = arr.optJSONObject(j) ?: continue
+                        val title = clean(f.optString("title"))
+                        if (title.isEmpty()) continue
+                        val query = f.optString("query")
+                        val raw = query.substringAfter("filterType=", "")
+                        val ft = runCatching {
+                            JSONObject(URLDecoder.decode(raw, "UTF-8"))
+                        }.getOrNull()
+                        fun value(key: String): String {
+                            val v = clean(ft?.optString(key))
+                            return if (v.equals("All", true)) "" else v
+                        }
+                        filters.add(
+                            HomeFilter(
+                                title = title,
+                                image = f.optJSONObject("image")?.optString("url").orEmpty(),
+                                genre = value("genre"),
+                                country = value("country"),
+                                year = value("year"),
+                                sort = value("sort"),
+                            )
+                        )
+                    }
+                    if (filters.isNotEmpty()) {
+                        sections.add(
+                            HomeSection(
+                                type = type,
+                                title = clean(op.optString("title")),
+                                filters = filters,
+                            )
+                        )
+                    }
+                }
+            }
+            HomeFeed(banners, sections)
+        }
+    }
 
     /** Ranking boards ("TOP Movies", "Bollywood", …). */
     suspend fun rankBoards(): List<RankBoard> = cached("rank-boards") {

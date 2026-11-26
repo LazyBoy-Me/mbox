@@ -16,9 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -29,7 +27,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,214 +40,87 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.mbox.Api
-import app.mbox.HotSection
+import app.mbox.HomeFeed
+import app.mbox.HomeFilter
 import app.mbox.R
 import app.mbox.Store
 import app.mbox.Subject
 import coil.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
+/**
+ * Home is not our own layout: `/home?host=…` returns the stock app's ordered `operatingList`
+ * (banner, "Popular Series", "Popular Movie", "Categories", …). Drawing that list in order is
+ * what makes the rows, their titles and their order match the real app. There is deliberately no
+ * "Continue Watching" here — the stock app keeps history under Me/Settings.
+ */
 @Composable
 fun HomeScreen(
     onOpen: (Subject) -> Unit,
-    onResume: (app.mbox.HistoryEntry) -> Unit,
     onSearch: () -> Unit,
     onDownloads: () -> Unit,
-    onMidnight: () -> Unit,
 ) {
-    // Seed from Api's in-memory cache: returning to Home after Search or the player is instant
-    // and costs no request, which is the whole point of keeping the response cache.
-    var sections by remember { mutableStateOf(Api.cachedHotSections().orEmpty()) }
-    var genres by remember { mutableStateOf(Api.cachedFilterOptions()?.genres.orEmpty()) }
-    var category by rememberSaveable { mutableStateOf("All") }
-    var genreItems by remember {
-        mutableStateOf(
-            if (category == "All") emptyList()
-            else Api.cachedFiltered(genre = category).orEmpty()
-        )
-    }
-    var genreLoading by remember { mutableStateOf(false) }
-    var loaded by remember { mutableStateOf(sections.isNotEmpty()) }
+    var feed by remember { mutableStateOf(Api.cachedHomeFeed() ?: HomeFeed()) }
+    var loading by remember { mutableStateOf(feed.sections.isEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
-    var history by remember { mutableStateOf(Store.history().take(10)) }
-    var midnight by remember { mutableStateOf<List<Subject>>(emptyList()) }
-    var showRank by remember { mutableStateOf(false) }
     var showBrowse by remember { mutableStateOf(false) }
+    var browseFilter by remember { mutableStateOf<HomeFilter?>(null) }
 
-    LaunchedEffect(Unit) {
-        if (sections.isEmpty()) {
-            val hot = runCatching { Api.hotSections() }.getOrNull()
-            if (hot.isNullOrEmpty()) {
-                error = "Couldn't reach MovieBox. Switch tabs and come back."
-            } else {
-                sections = hot
-            }
-        }
-        if (genres.isEmpty()) {
-            genres = runCatching { Api.filterOptions().genres }.getOrDefault(emptyList())
-        }
-        if (!Store.familyMode) {
-            midnight = runCatching { Api.midnight(1).items }.getOrDefault(emptyList())
-        }
-        history = Store.history().take(10)
-        loaded = true
-    }
-
-    var familySeen by remember { mutableStateOf(Store.familyEpoch) }
     LaunchedEffect(Store.familyEpoch) {
-        if (familySeen == Store.familyEpoch) return@LaunchedEffect
-        familySeen = Store.familyEpoch
-        // The cache was cleared with the flag; every list must be fetched again. While the new
-        // answer is in flight, drop the rows that are now illegal instead of showing them.
-        if (Store.familyMode) {
-            sections = sections.map { sec -> sec.copy(items = sec.items.filter { !it.adult }) }
-            genreItems = genreItems.filter { !it.adult }
-            midnight = emptyList()
-        }
+        loading = feed.sections.isEmpty()
         error = null
-        sections = runCatching { Api.hotSections() }.getOrDefault(sections)
-        genres = runCatching { Api.filterOptions().genres }.getOrDefault(genres)
-        if (!Store.familyMode) {
-            midnight = runCatching { Api.midnight(1).items }.getOrDefault(emptyList())
+        feed = try {
+            Api.homeFeed()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            HomeFeed()
         }
-        if (category != "All") {
-            genreLoading = true
-            genreItems = runCatching { Api.filtered(subjectType = 0, genre = category) }
-                .getOrDefault(emptyList())
-            genreLoading = false
+        if (feed.sections.isEmpty()) {
+            error = "Couldn't reach MovieBox. Pull a tab and come back."
         }
-        history = Store.history().take(10)
-        loaded = true
-    }
-
-    LaunchedEffect(category) {
-        if (category == "All") {
-            genreItems = emptyList()
-            return@LaunchedEffect
-        }
-        // Chips visited earlier are already in memory; only an unseen genre shows a spinner.
-        val cached = Api.cachedFiltered(genre = category)
-        if (cached != null) {
-            genreItems = cached
-            genreLoading = false
-            return@LaunchedEffect
-        }
-        genreLoading = true
-        genreItems = runCatching { Api.filtered(subjectType = 0, genre = category) }
-            .getOrDefault(emptyList())
-        genreLoading = false
-    }
-
-    val all = remember(sections) { sections.flatMap { it.items }.distinctBy { it.id } }
-    val movies = remember(sections) {
-        sections.firstOrNull { it.name.contains("Movie", true) }?.items
-            ?: all.filter { it.type == 1 }
-    }
-
-    if (showRank) {
-        RankScreen(onBack = { showRank = false }, onOpen = onOpen)
-        return
+        loading = false
     }
 
     if (showBrowse) {
+        val f = browseFilter
         BrowseScreen(
             onBack = { showBrowse = false },
             onOpen = onOpen,
-            startGenre = category.takeIf { it != "All" }.orEmpty(),
+            startGenre = f?.genre.orEmpty(),
+            startCountry = f?.country.orEmpty(),
+            startYear = f?.year.orEmpty(),
+            startSort = f?.sort.orEmpty(),
         )
         return
     }
 
     Column(Modifier.fillMaxSize().background(Bg)) {
         TopBar(onSearch = onSearch, onDownloads = onDownloads)
-        GenreStrip(
-            items = listOf("All") + genres,
-            selected = category,
-            onSelect = { category = it },
-            onBrowse = { showBrowse = true },
-        )
 
-        if (!loaded) {
-            LoadingBox()
-            return@Column
-        }
-        error?.let {
-            MessageBox(it)
-            return@Column
-        }
-
-        if (category != "All") {
-            // A lazy grid only composes visible posters; the old chunked rows built the whole list.
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(3),
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(start = 12.dp, end = 12.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                item(span = { GridItemSpan(maxLineSpan) }) { SectionHeader(category) }
-                when {
-                    genreLoading -> item(span = { GridItemSpan(maxLineSpan) }) {
-                        Box(
-                            Modifier.fillMaxWidth().padding(40.dp),
-                            contentAlignment = Alignment.Center,
-                        ) { LoadingBox(Modifier.height(60.dp)) }
-                    }
-
-                    genreItems.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) {
-                        MessageBox("Nothing in $category right now.")
-                    }
-
-                    else -> items(genreItems.size) { i ->
-                        val s = genreItems[i]
-                        PosterCard(s, Modifier.fillMaxWidth()) { onOpen(s) }
-                    }
-                }
-            }
-        } else {
-            LazyColumn(
+        when {
+            loading -> LoadingBox()
+            error != null && feed.sections.isEmpty() -> MessageBox(error.orEmpty())
+            else -> LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 24.dp),
             ) {
-                run {
-                    val hero = movies.ifEmpty { all }.take(6)
-                    if (hero.isNotEmpty()) {
-                        item { HeroPager(hero, onOpen) }
-                    }
-                    if (!Store.familyMode && midnight.isNotEmpty()) {
-                        item { SectionHeader("🔞 Midnight", "See all") { onMidnight() } }
-                        item { HorizontalPosterRow(midnight.take(12), onOpen) }
-                    }
-                    item { TipBanner(onDownloads) }
-                    if (history.isNotEmpty()) {
-                        item { SectionHeader("Continue Watching") }
+                if (feed.banners.isNotEmpty()) {
+                    item { HeroPager(feed.banners, onOpen) }
+                }
+                feed.sections.forEach { section ->
+                    if (section.filters.isNotEmpty()) {
+                        item { SectionHeader(section.title) }
                         item {
-                            androidx.compose.foundation.lazy.LazyRow(
-                                contentPadding = PaddingValues(horizontal = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                items(history.size) { i ->
-                                    HistoryCard(history[i]) { h -> onResume(h) }
-                                }
+                            CategoryRow(section.filters) { filter ->
+                                browseFilter = filter
+                                showBrowse = true
                             }
                         }
-                    }
-                    if (movies.isNotEmpty()) {
-                        item { SectionHeader("Top 10 this week", "Rankings") { showRank = true } }
-                        item { HorizontalPosterRow(movies.take(10), onOpen, showRank = true) }
-                        item { SectionHeader("Popular Movies") }
-                        item { PosterGrid(movies.drop(10).ifEmpty { movies }.take(18), onOpen) }
-                    }
-                    sections.filter { it.name.contains("Movie", true).not() && it.items.isNotEmpty() }
-                        .take(6)
-                        .forEach { sec ->
-                            item { SectionHeader(sec.name) }
-                            item { HorizontalPosterRow(sec.items, onOpen) }
-                        }
-                    val series = all.filter { it.type == 2 }
-                    if (series.isNotEmpty()) {
-                        item { SectionHeader("Trending Series") }
-                        item { HorizontalPosterRow(series.distinctBy { it.id }.take(20), onOpen) }
+                    } else if (section.items.isNotEmpty()) {
+                        item { SectionHeader(section.title) }
+                        item { HorizontalPosterRow(section.items, onOpen) }
                     }
                 }
             }
@@ -286,7 +156,7 @@ private fun HeroPager(items: List<Subject>, onOpen: (Subject) -> Unit) {
                     .clickable { onOpen(s) },
             ) {
                 AsyncImage(
-                    model = s.cover,
+                    model = s.still.ifBlank { s.cover },
                     contentDescription = s.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
@@ -359,74 +229,48 @@ private fun HeroPager(items: List<Subject>, onOpen: (Subject) -> Unit) {
     }
 }
 
+/** The stock app's "Categories" cards (Hollywood, Bollywood, Western, …). */
 @Composable
-private fun TipBanner(onDownloads: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(Color(0xFF17231C))
-            .clickable(onClick = onDownloads)
-            .padding(horizontal = 12.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
+private fun CategoryRow(filters: List<HomeFilter>, onClick: (HomeFilter) -> Unit) {
+    LazyRow(
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        androidx.compose.material3.Icon(
-            painter = painterResource(R.drawable.ic_movie_download),
-            contentDescription = null,
-            tint = AccentSoft,
-            modifier = Modifier.size(18.dp),
-        )
-        Spacer(Modifier.width(9.dp))
-        Column(Modifier.weight(1f)) {
-            Text("Download and watch offline", color = TextMain, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-            Text("Full quality · no account needed", color = TextMute, fontSize = 10.sp)
-        }
-        Text("Open", color = AccentSoft, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun HistoryCard(h: app.mbox.HistoryEntry, onClick: (app.mbox.HistoryEntry) -> Unit) {
-    Column(Modifier.width(156.dp).clickable { onClick(h) }) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(5.dp))
-                .background(Surface2),
-        ) {
-            AsyncImage(
-                model = h.still.ifBlank { h.cover },
-                contentDescription = h.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
+        items(filters.size) { i ->
+            val f = filters[i]
             Box(
                 Modifier
-                    .fillMaxWidth()
-                    .height(2.5.dp)
-                    .align(Alignment.BottomCenter)
-                    .background(Color(0x66FFFFFF))
-            )
-            Box(
-                Modifier
-                    .fillMaxWidth(h.progress)
-                    .height(2.5.dp)
-                    .align(Alignment.BottomCenter)
-                    .background(Accent)
-            )
+                    .width(148.dp)
+                    .height(76.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Surface2)
+                    .clickable { onClick(f) },
+            ) {
+                AsyncImage(
+                    model = f.image,
+                    contentDescription = f.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color(0x22000000), Color(0xCC000000))
+                            )
+                        )
+                )
+                Text(
+                    f.title,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(8.dp),
+                )
+            }
         }
-        Spacer(Modifier.height(4.dp))
-        Text(h.title, color = TextMain, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(
-            buildString {
-                if (h.type == 2) append("S${h.se} E${h.ep}  ·  ")
-                append("${(h.progress * 100).toInt()}% watched")
-            },
-            color = TextMute,
-            fontSize = 10.sp,
-            maxLines = 1,
-        )
     }
 }

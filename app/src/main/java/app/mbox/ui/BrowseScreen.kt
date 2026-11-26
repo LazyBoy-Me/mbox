@@ -51,12 +51,15 @@ fun BrowseScreen(
     onBack: () -> Unit,
     onOpen: (Subject) -> Unit,
     startGenre: String = "",
+    startCountry: String = "",
+    startYear: String = "",
+    startSort: String = "",
 ) {
     var options by remember { mutableStateOf(Api.cachedFilterOptions() ?: FilterOptions()) }
     var genre by rememberSaveable { mutableStateOf(startGenre) }
-    var country by rememberSaveable { mutableStateOf("") }
-    var year by rememberSaveable { mutableStateOf("") }
-    var sort by rememberSaveable { mutableStateOf("") }
+    var country by rememberSaveable { mutableStateOf(startCountry) }
+    var year by rememberSaveable { mutableStateOf(startYear) }
+    var sort by rememberSaveable { mutableStateOf(startSort) }
     var items by remember {
         mutableStateOf(Api.cachedFiltered(0, genre, country, year, sort).orEmpty())
     }

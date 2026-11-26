@@ -187,6 +187,7 @@ fun WatchScreen(
 
     // ------------------------------------------------------------------ chrome
     var fullscreen by remember { mutableStateOf(false) }
+    var orientationReady by remember { mutableStateOf(false) }
     var controlsVisible by remember { mutableStateOf(true) }
     var locked by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(0) } // 1 quality 2 audio 3 speed 4 settings 5 subtitle
@@ -226,53 +227,68 @@ fun WatchScreen(
     val maxEp = seasons.firstOrNull { it.se == se }?.maxEp ?: spec.maxEp
 
     fun setSource(item: StreamRes, startMs: Long) {
-        val ds = DefaultHttpDataSource.Factory()
-            .setUserAgent(Api.WEB_UA)
-            .setDefaultRequestProperties(mapOf("Referer" to item.referer))
-            .setConnectTimeoutMs(20_000)
-            .setReadTimeoutMs(30_000)
-            .setAllowCrossProtocolRedirects(true)
-        val builder = MediaItem.Builder().setUri(item.url)
-        caption?.let { c ->
-            builder.setSubtitleConfigurations(
-                listOf(
-                    MediaItem.SubtitleConfiguration.Builder(Uri.parse(c.url))
-                        .setMimeType(c.mime)
-                        .setLanguage(c.lang.ifBlank { "und" })
-                        .setLabel(c.name)
-                        .build()
+        // Everything below touches Media3 on the main thread. A malformed URL, an illegal header
+        // value from the CDN referer or a released player would otherwise throw out of the
+        // composition and take the whole process down, which is what "the app kicks me out when I
+        // press play" looks like from the outside.
+        try {
+            val ds = DefaultHttpDataSource.Factory()
+                .setUserAgent(Api.WEB_UA)
+                .setDefaultRequestProperties(mapOf("Referer" to item.referer))
+                .setConnectTimeoutMs(20_000)
+                .setReadTimeoutMs(30_000)
+                .setAllowCrossProtocolRedirects(true)
+            val builder = MediaItem.Builder().setUri(item.url)
+            caption?.let { c ->
+                builder.setSubtitleConfigurations(
+                    listOf(
+                        MediaItem.SubtitleConfiguration.Builder(Uri.parse(c.url))
+                            .setMimeType(c.mime)
+                            .setLanguage(c.lang.ifBlank { "und" })
+                            .setLabel(c.name)
+                            .build()
+                    )
                 )
-            )
+            }
+            val mediaItem = builder.build()
+            val source = when {
+                item.url.contains(".m3u8", true) -> HlsMediaSource.Factory(ds).createMediaSource(mediaItem)
+                item.url.contains(".mpd", true) -> DashMediaSource.Factory(ds).createMediaSource(mediaItem)
+                else -> ProgressiveMediaSource.Factory(ds).createMediaSource(mediaItem)
+            }
+            player.setMediaSource(source)
+            player.prepare()
+            if (startMs > 0) player.seekTo(startMs)
+            player.setPlaybackSpeed(speed)
+            player.playWhenReady = true
+            current = item
+            error = null
+            status = null
+        } catch (t: Throwable) {
+            status = null
+            error = "This stream couldn't start (${t.javaClass.simpleName}). Try another quality or episode."
         }
-        val mediaItem = builder.build()
-        val source = when {
-            item.url.contains(".m3u8", true) -> HlsMediaSource.Factory(ds).createMediaSource(mediaItem)
-            item.url.contains(".mpd", true) -> DashMediaSource.Factory(ds).createMediaSource(mediaItem)
-            else -> ProgressiveMediaSource.Factory(ds).createMediaSource(mediaItem)
-        }
-        player.setMediaSource(source)
-        player.prepare()
-        if (startMs > 0) player.seekTo(startMs)
-        player.setPlaybackSpeed(speed)
-        player.playWhenReady = true
-        current = item
-        error = null
-        status = null
     }
 
     fun setLocal(path: String) {
-        val base = DefaultHttpDataSource.Factory().setUserAgent(Api.PLAYER_UA)
-        player.setMediaSource(
-            ProgressiveMediaSource.Factory(DefaultDataSource.Factory(ctx, base))
-                .createMediaSource(MediaItem.fromUri(Uri.fromFile(File(path))))
-        )
-        player.prepare()
-        player.setPlaybackSpeed(speed)
-        player.playWhenReady = true
-        status = null
+        try {
+            val base = DefaultHttpDataSource.Factory().setUserAgent(Api.PLAYER_UA)
+            player.setMediaSource(
+                ProgressiveMediaSource.Factory(DefaultDataSource.Factory(ctx, base))
+                    .createMediaSource(MediaItem.fromUri(Uri.fromFile(File(path))))
+            )
+            player.prepare()
+            player.setPlaybackSpeed(speed)
+            player.playWhenReady = true
+            status = null
+        } catch (t: Throwable) {
+            status = null
+            error = "The downloaded file couldn't be opened (${t.javaClass.simpleName})."
+        }
     }
 
     fun orderCandidates(list: List<StreamRes>): List<StreamRes> {
+        if (list.isEmpty()) return list
         val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         val caps = cm?.getNetworkCapabilities(cm.activeNetwork)
         val wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
@@ -399,12 +415,17 @@ fun WatchScreen(
     LaunchedEffect(player) {
         var lastSave = 0L
         while (true) {
-            positionMs = player.currentPosition.coerceAtLeast(0)
-            durationMs = player.duration.takeIf { it > 0 } ?: 0L
-            val now = System.currentTimeMillis()
-            if (now - lastSave > 5000 && durationMs > 0 && !localPlayback && detail.id.isNotBlank()) {
-                lastSave = now
-                Store.remember(detail, se, ep, positionMs, durationMs)
+            // The player can be released between two ticks (mini → close, new title). Reading a
+            // released player throws, and an exception here would leave the composition and kill
+            // the process, so each tick is guarded.
+            runCatching {
+                positionMs = player.currentPosition.coerceAtLeast(0)
+                durationMs = player.duration.takeIf { it > 0 } ?: 0L
+                val now = System.currentTimeMillis()
+                if (now - lastSave > 5000 && durationMs > 0 && !localPlayback && detail.id.isNotBlank()) {
+                    lastSave = now
+                    Store.remember(detail, se, ep, positionMs, durationMs)
+                }
             }
             delay(500)
         }
@@ -469,6 +490,13 @@ fun WatchScreen(
         controlsVisible = true
         menu = 0
         boosting = false
+        // Do not force portrait on the very first frame: opening a video while the phone is in
+        // landscape used to request an orientation change immediately and could bounce the
+        // activity (and playback) before the first stream arrived.
+        if (!orientationReady) {
+            orientationReady = true
+            return@LaunchedEffect
+        }
         activity?.requestedOrientation = if (fullscreen) {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {

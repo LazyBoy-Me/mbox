@@ -150,6 +150,29 @@ data class MidnightPage(
     val hasMore: Boolean = false,
 )
 
+/** A "Categories" card from the stock home feed (Hollywood, Bollywood, …). */
+data class HomeFilter(
+    val title: String = "",
+    val image: String = "",
+    val genre: String = "",
+    val country: String = "",
+    val year: String = "",
+    val sort: String = "",
+)
+
+/** One block of `/home?host=…`'s `operatingList`, in the exact order the stock app draws it. */
+data class HomeSection(
+    val type: String = "",
+    val title: String = "",
+    val items: List<Subject> = emptyList(),
+    val filters: List<HomeFilter> = emptyList(),
+)
+
+data class HomeFeed(
+    val banners: List<Subject> = emptyList(),
+    val sections: List<HomeSection> = emptyList(),
+)
+
 /** One entry of the on-device watch history. */
 data class HistoryEntry(
     val id: String,

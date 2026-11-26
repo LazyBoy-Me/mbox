@@ -1,5 +1,7 @@
 package app.mbox.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
@@ -9,6 +11,8 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,6 +47,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,6 +74,8 @@ fun MeScreen(
     var myList by remember { mutableStateOf(Store.myList()) }
     var family by remember { mutableStateOf(Store.familyMode) }
     var confirmAdult by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    var showCrash by remember { mutableStateOf(false) }
 
     // Family Mode changes what history and My List may show; refresh both counters immediately.
     LaunchedEffect(family) {
@@ -144,6 +152,13 @@ fun MeScreen(
             item { MeGroupTitle("Library") }
             item {
                 MeRow(R.drawable.ic_me_history, "Watch history", "Everything you started") { page = 1 }
+            }
+            item {
+                MeRow(
+                    R.drawable.ic_me_history,
+                    "Clear watch history",
+                    "Delete every saved position",
+                ) { confirmClear = true }
             }
             item { MeRow(R.drawable.ic_me_my_list, "My list", "Saved titles") { page = 2 } }
             item { MeRow(R.drawable.ic_movie_download, "Downloads", "Offline copies") { onDownloads() } }
@@ -269,11 +284,15 @@ fun MeScreen(
                     if (crash.isNotBlank()) {
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "Last crash: " + crash.lineSequence().first(),
+                            "Last crash: " + crash.lineSequence().first() + "  (tap for details)",
                             color = Color(0xFFFF8A80),
                             fontSize = 10.sp,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { showCrash = true }
+                                .padding(vertical = 4.dp),
                         )
                     }
                     Spacer(Modifier.height(3.dp))
@@ -295,6 +314,38 @@ fun MeScreen(
         }
     }
 
+    if (confirmClear) {
+        ConfirmDialog(
+            title = "Clear watch history?",
+            message = "Every saved position and Continue Watching entry will be deleted. This cannot be undone.",
+            confirm = "Clear",
+            danger = true,
+            onDismiss = { confirmClear = false },
+            onConfirm = {
+                confirmClear = false
+                Store.clearHistory()
+                history = emptyList()
+                showSimpleToast(ctx, "Watch history cleared")
+            },
+        )
+    }
+
+    if (showCrash) {
+        CrashDialog(
+            text = Store.lastCrash,
+            onDismiss = { showCrash = false },
+            onClear = {
+                Store.lastCrash = ""
+                showCrash = false
+            },
+            onCopy = {
+                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.setPrimaryClip(ClipData.newPlainText("MBox crash", Store.lastCrash))
+                showSimpleToast(ctx, "Crash log copied")
+            },
+        )
+    }
+
     if (confirmAdult) {
         AdultGateDialog(
             onDismiss = { confirmAdult = false },
@@ -306,6 +357,149 @@ fun MeScreen(
             },
         )
     }
+}
+
+/**
+ * Shows the whole captured stack trace. The summary line under Me → About is not enough to fix a
+ * playback crash, and this phone has no adb/logcat, so the full text has to be readable and
+ * copyable from inside the app.
+ */
+@Composable
+private fun CrashDialog(
+    text: String,
+    onDismiss: () -> Unit,
+    onClear: () -> Unit,
+    onCopy: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color.White)
+                .padding(16.dp),
+        ) {
+            Text("Last crash", color = Color(0xFF333333), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text.ifBlank { "No crash recorded." },
+                color = Color(0xFF333333),
+                fontSize = 10.sp,
+                lineHeight = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+            )
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Close",
+                    color = Color(0xFF333333),
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xFFF2F3F5))
+                        .clickable(onClick = onDismiss)
+                        .padding(vertical = 9.dp),
+                )
+                Text(
+                    "Copy",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Accent)
+                        .clickable(onClick = onCopy)
+                        .padding(vertical = 9.dp),
+                )
+                Text(
+                    "Clear",
+                    color = Color(0xFFE53935),
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xFFF2F3F5))
+                        .clickable(onClick = onClear)
+                        .padding(vertical = 9.dp),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Small confirmation card, same shape as the stock app's white dialogs. Used for destructive
+ * settings such as clearing the watch history.
+ */
+@Composable
+private fun ConfirmDialog(
+    title: String,
+    message: String,
+    confirm: String,
+    danger: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color.White)
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(title, color = Color(0xFF333333), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                message,
+                color = Color(0xFF555555),
+                fontSize = 13.sp,
+                lineHeight = 19.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Cancel",
+                    color = Color(0xFF333333),
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xFFF2F3F5))
+                        .clickable(onClick = onDismiss)
+                        .padding(vertical = 9.dp),
+                )
+                Text(
+                    confirm,
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (danger) Color(0xFFE53935) else Accent)
+                        .clickable(onClick = onConfirm)
+                        .padding(vertical = 9.dp),
+                )
+            }
+        }
+    }
+}
+
+private fun showSimpleToast(ctx: Context, message: String) {
+    runCatching { Toast.makeText(ctx.applicationContext, message, Toast.LENGTH_SHORT).show() }
 }
 
 /**

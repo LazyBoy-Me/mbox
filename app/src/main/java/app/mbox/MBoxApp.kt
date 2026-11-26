@@ -58,9 +58,14 @@ class MBoxApp : Application(), ImageLoaderFactory {
                 error.printStackTrace(PrintWriter(buffer))
                 Store.lastCrash = buildString {
                     append(error.javaClass.simpleName).append(": ")
-                    append(error.message.orEmpty().take(180))
+                    append(error.message.orEmpty().take(200))
                     append("\n\n")
-                    append(buffer.toString().lines().take(24).joinToString("\n"))
+                    append("thread: ").append(thread.name).append('\n')
+                    append("device: ").append(android.os.Build.MANUFACTURER).append(' ')
+                    append(android.os.Build.MODEL).append(", Android ")
+                    append(android.os.Build.VERSION.RELEASE).append(" (API ")
+                    append(android.os.Build.VERSION.SDK_INT).append(")\n\n")
+                    append(buffer.toString().lines().take(40).joinToString("\n"))
                 }
             }
             previous?.uncaughtException(thread, error)

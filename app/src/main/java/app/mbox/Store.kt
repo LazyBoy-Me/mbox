@@ -79,10 +79,14 @@ object Store {
         get() = p()?.getFloat("speed", 1f) ?: 1f
         set(v) { p()?.edit()?.putFloat("speed", v)?.apply() }
 
-    /** Last fatal error, captured by [MBoxApp] and shown under Me → About. */
+    /**
+     * Last fatal error, captured by [MBoxApp] and shown under Me → About. The write is synchronous
+     * (`commit`) because the process dies immediately after the handler returns; an `apply` can be
+     * lost, which would leave us with an empty report.
+     */
     var lastCrash: String
         get() = p()?.getString("lastCrash", "") ?: ""
-        set(v) { p()?.edit()?.putString("lastCrash", v)?.apply() }
+        set(v) { p()?.edit()?.putString("lastCrash", v)?.commit() }
 
     // ------------------------------------------------------------------ history
 
