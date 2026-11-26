@@ -412,6 +412,8 @@ private fun showFamilyToast(ctx: Context, on: Boolean) {
         ).show()
     }
 }
+
+private fun sizeText(bytes: Long): String = when {
     bytes <= 0L -> "0 MB"
     bytes >= 1_000_000_000L -> String.format("%.2f GB", bytes / 1_000_000_000.0)
     else -> String.format("%.0f MB", bytes / 1_000_000.0)
