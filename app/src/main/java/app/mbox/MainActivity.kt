@@ -29,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,6 +45,7 @@ import app.mbox.ui.DownloadsScreen
 import app.mbox.ui.HomeScreen
 import app.mbox.ui.MBoxTheme
 import app.mbox.ui.MeScreen
+import app.mbox.ui.MidnightScreen
 import app.mbox.ui.SearchScreen
 import app.mbox.ui.TextMain
 import app.mbox.ui.TextMute
@@ -79,7 +81,7 @@ class MainActivity : ComponentActivity() {
      * enables auto-enter itself through [Pip.params].
      */
     override fun onUserLeaveHint() {
-        if (Pip.active && !inPip.value &&
+        if (Pip.active && !Pip.mini && !inPip.value &&
             Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.R
         ) {
             runCatching { enterPictureInPictureMode(Pip.params(this, autoEnter = false)) }
@@ -103,13 +105,63 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * Compose can save a nullable [PlaySpec] across an activity/process recreation, so the mini
+ * player is not silently lost when the phone kills the background activity.
+ */
+private val PlaySpecSaver: Saver<PlaySpec?, ArrayList<Any>> = Saver(
+    save = { spec ->
+        spec?.let {
+            arrayListOf<Any>(
+                it.baseId, it.title, it.series, it.se, it.ep,
+                it.dubId, it.maxEp, it.localPath, it.startMs,
+            )
+        }
+    },
+    restore = { v ->
+        PlaySpec(
+            baseId = v[0] as String,
+            title = v[1] as String,
+            series = v[2] as Boolean,
+            se = v[3] as Int,
+            ep = v[4] as Int,
+            dubId = v[5] as String,
+            maxEp = v[6] as Int,
+            localPath = v[7] as String,
+            startMs = v[8] as Long,
+        )
+    },
+)
+
 @Composable
 private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
     var tab by rememberSaveable { mutableStateOf(0) }
-    var playback by remember { mutableStateOf<PlaySpec?>(null) }
+    var playback by rememberSaveable(stateSaver = PlaySpecSaver) { mutableStateOf<PlaySpec?>(null) }
     // Mini player: the watch screen keeps running over the tab host in a small window. Its player
     // is never disposed, so audio and buffered data carry on while browsing.
-    var mini by remember { mutableStateOf(false) }
+    var mini by rememberSaveable { mutableStateOf(false) }
+
+    // The stock app's "Midnight" strip only exists while Family Mode is off. Turning Family Mode
+    // back on while that tab is open must never leave a blank tab selected.
+    val familyMode = Store.familyMode
+    LaunchedEffect(familyMode) {
+        if (familyMode && tab == 4) tab = 0
+    }
+
+    // Back must never destroy a floating player. Inside the app it walks tabs; at Home it sends
+    // the task to the background so audio keeps running instead of finishing the activity.
+    val activity = androidx.compose.ui.platform.LocalContext.current as? android.app.Activity
+    BackHandler(enabled = mini || tab != 0) {
+        when {
+            tab != 0 -> tab = 0
+            mini -> activity?.moveTaskToBack(true)
+            else -> Unit
+        }
+    }
+
+    // PiP auto-enter is for the full player only; a mini window must stay inside the app when the
+    // user presses Home, otherwise the OEM picture-in-picture window fights with it.
+    LaunchedEffect(mini) { Pip.mini = mini }
 
     LaunchedEffect(Unit) { Api.ensureToken() }
 
@@ -168,6 +220,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                         onResume = { resume(it) },
                         onSearch = { tab = 1 },
                         onDownloads = { tab = 2 },
+                        onMidnight = { tab = 4 },
                     )
 
                     1 -> SearchScreen(
@@ -179,19 +232,27 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                         onOpen = { mini = false; playback = it },
                     )
 
-                    else -> MeScreen(
-                        version = "1.8",
+                    3 -> MeScreen(
+                        version = "1.9",
                         onDownloads = { tab = 2 },
                         onOpen = { open(it) },
                         onResume = { resume(it) },
                     )
+
+                    else -> MidnightScreen(onOpen = { open(it) })
                 }
             }
-            BottomBar(tab) { tab = it }
+            BottomBar(tab, showMidnight = !familyMode) { tab = it }
         }
 
         if (currentPlayback != null) {
-            key(currentPlayback.baseId, currentPlayback.localPath) {
+            key(
+                currentPlayback.baseId,
+                currentPlayback.localPath,
+                currentPlayback.se,
+                currentPlayback.ep,
+                currentPlayback.startMs,
+            ) {
                 WatchScreen(
                     spec = currentPlayback,
                     inPip = inPip,
@@ -210,7 +271,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
 }
 
 @Composable
-private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
+private fun BottomBar(selected: Int, showMidnight: Boolean, onSelect: (Int) -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         Box(Modifier.fillMaxWidth().height(0.5.dp).background(androidx.compose.ui.graphics.Color(0x1FFFFFFF)))
         Row(
@@ -218,45 +279,56 @@ private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
                 .fillMaxWidth()
                 .background(androidx.compose.ui.graphics.Color(0xFF16181D))
                 .height(58.dp)
-                .padding(horizontal = 4.dp),
+                .padding(horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
             TabItem("Home", R.drawable.ic_tab_home_active, R.drawable.ic_tab_home_unactive_dark, selected == 0) { onSelect(0) }
             TabItem("Search", R.drawable.ic_tab_search, R.drawable.ic_tab_search, selected == 1, plain = true) { onSelect(1) }
             TabItem("Downloads", R.drawable.ic_tab_downloads_active, R.drawable.ic_tab_downloads_unactive_dark, selected == 2) { onSelect(2) }
             TabItem("Me", R.drawable.ic_tab_me_active, R.drawable.ic_tab_me_unactive_dark, selected == 3) { onSelect(3) }
+            if (showMidnight) {
+                // No Midnight tab exists in the stock app; the red 18+ sign is the clearest marker
+                // for the same rows Family Mode would otherwise hide.
+                TabItem("Midnight", 0, 0, selected == 4, emoji = "🔞") { onSelect(4) }
+            }
         }
     }
 }
 
 @Composable
-private fun TabItem(
+private fun androidx.compose.foundation.layout.RowScope.TabItem(
     label: String,
     activeIcon: Int,
     inactiveIcon: Int,
     active: Boolean,
     plain: Boolean = false,
+    emoji: String? = null,
     onClick: () -> Unit,
 ) {
     Column(
         Modifier
-            .width(74.dp)
+            .weight(1f)
             .clip(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .padding(vertical = 5.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        if (plain) {
-            androidx.compose.material3.Icon(
+        when {
+            emoji != null -> Text(
+                emoji,
+                fontSize = 20.sp,
+                modifier = Modifier.height(24.dp),
+            )
+
+            plain -> androidx.compose.material3.Icon(
                 painter = painterResource(inactiveIcon),
                 contentDescription = label,
                 tint = if (active) androidx.compose.ui.graphics.Color(0xFF2FF58B)
                 else androidx.compose.ui.graphics.Color(0xE6FFFFFF),
                 modifier = Modifier.size(24.dp),
             )
-        } else {
-            Image(
+
+            else -> Image(
                 painter = painterResource(if (active) activeIcon else inactiveIcon),
                 contentDescription = label,
                 modifier = Modifier.size(24.dp),

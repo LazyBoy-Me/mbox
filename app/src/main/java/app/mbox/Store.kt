@@ -1,6 +1,9 @@
 package app.mbox
 
 import android.content.Context
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -13,11 +16,33 @@ object Store {
     private const val FILE = "mbox_local"
     private var prefs: android.content.SharedPreferences? = null
 
+    private val familyState = mutableStateOf(true)
+
     fun init(ctx: Context) {
         if (prefs == null) prefs = ctx.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+        familyState.value = p()?.getBoolean("familyMode", true) ?: true
     }
 
     private fun p(): android.content.SharedPreferences? = prefs
+
+    /**
+     * Stock app's Family Mode: ON hides every title whose API record carries `restrictKid = 1`.
+     * It is a Compose state, so switching it recomposes every screen that reads it; [familyEpoch]
+     * is bumped at the same time so screens reload the lists that were fetched while filtering.
+     */
+    var familyMode: Boolean
+        get() = familyState.value
+        set(v) {
+            if (familyState.value == v) return
+            familyState.value = v
+            p()?.edit()?.putBoolean("familyMode", v)?.apply()
+            Api.clearCache()
+            familyEpoch++
+        }
+
+    /** Changes whenever Family Mode is toggled; usable as a LaunchedEffect key. */
+    var familyEpoch by mutableStateOf(0)
+        private set
 
     // ------------------------------------------------------------------ settings
 
@@ -81,6 +106,7 @@ object Store {
                         position = o.optLong("pos"),
                         duration = o.optLong("dur"),
                         updated = o.optLong("upd"),
+                        adult = o.optBoolean("adult"),
                     )
                 )
             }
@@ -97,12 +123,16 @@ object Store {
                     .put("still", h.still)
                     .put("type", h.type).put("se", h.se).put("ep", h.ep)
                     .put("pos", h.position).put("dur", h.duration).put("upd", h.updated)
+                    .put("adult", h.adult)
             )
         }
         p()?.edit()?.putString("history", arr.toString())?.apply()
     }
 
-    fun history(): List<HistoryEntry> = readHistory().sortedByDescending { it.updated }
+    fun history(): List<HistoryEntry> =
+        readHistory()
+            .filter { !Store.familyMode || !it.adult }
+            .sortedByDescending { it.updated }
 
     fun remember(s: Subject, se: Int, ep: Int, position: Long, duration: Long) {
         if (s.id.isEmpty()) return
@@ -113,7 +143,7 @@ object Store {
                 id = s.id, title = s.title, cover = s.cover,
                 still = s.still.ifBlank { s.cover }, type = s.type,
                 se = se, ep = ep, position = position, duration = duration,
-                updated = System.currentTimeMillis(),
+                updated = System.currentTimeMillis(), adult = s.adult,
             )
         )
         writeHistory(list.sortedByDescending { it.updated })
@@ -146,11 +176,12 @@ object Store {
                         genre = o.optString("genre"),
                         rating = o.optString("rating"),
                         badge = o.optString("badge"),
+                        adult = o.optBoolean("adult"),
                     )
                 )
             }
         }
-        return out
+        return out.filter { !Store.familyMode || !it.adult }
     }
 
     fun inList(id: String): Boolean = myList().any { it.id == id }
@@ -165,6 +196,7 @@ object Store {
                 JSONObject().put("id", x.id).put("title", x.title).put("type", x.type)
                     .put("cover", x.cover).put("year", x.year).put("genre", x.genre)
                     .put("rating", x.rating).put("badge", x.badge)
+                    .put("still", x.still).put("adult", x.adult)
             )
         }
         p()?.edit()?.putString("list", arr.toString())?.apply()

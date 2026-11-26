@@ -1,5 +1,12 @@
 package app.mbox.ui
 
+import android.content.Context
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +31,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,9 +43,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import app.mbox.HistoryEntry
 import app.mbox.R
 import app.mbox.Store
@@ -56,6 +66,14 @@ fun MeScreen(
     var page by remember { mutableStateOf(0) }
     var history by remember { mutableStateOf(Store.history()) }
     var myList by remember { mutableStateOf(Store.myList()) }
+    var family by remember { mutableStateOf(Store.familyMode) }
+    var confirmAdult by remember { mutableStateOf(false) }
+
+    // Family Mode changes what history and My List may show; refresh both counters immediately.
+    LaunchedEffect(family) {
+        history = Store.history()
+        myList = Store.myList()
+    }
 
     when (page) {
         1 -> HistoryPage(
@@ -129,6 +147,69 @@ fun MeScreen(
             }
             item { MeRow(R.drawable.ic_me_my_list, "My list", "Saved titles") { page = 2 } }
             item { MeRow(R.drawable.ic_movie_download, "Downloads", "Offline copies") { onDownloads() } }
+
+            item { MeGroupTitle("Content") }
+            item {
+                // The stock app's switch: ON is the default and hides every `restrictKid` title.
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            if (family) {
+                                confirmAdult = true
+                            } else {
+                                family = true
+                                Store.familyMode = true
+                                showFamilyToast(ctx, true)
+                            }
+                        }
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Image(
+                        painter = painterResource(R.drawable.ic_family_mode_toast),
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Family Mode", color = TextMain, fontSize = 14.sp)
+                        Text(
+                            if (family) "ON · hides potentially mature videos"
+                            else "OFF · 18+ titles are visible",
+                            color = TextMute,
+                            fontSize = 10.sp,
+                        )
+                    }
+                    Switch(
+                        checked = family,
+                        onCheckedChange = { on ->
+                            if (on) {
+                                family = true
+                                Store.familyMode = true
+                                showFamilyToast(ctx, true)
+                            } else {
+                                confirmAdult = true
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = Accent,
+                            uncheckedTrackColor = Surface2,
+                            uncheckedThumbColor = TextMute,
+                        ),
+                    )
+                }
+            }
+            item {
+                Text(
+                    "This helps hide potentially mature videos. No filter is 100% accurate.",
+                    color = TextMute,
+                    fontSize = 10.sp,
+                    lineHeight = 15.sp,
+                    modifier = Modifier.padding(start = 48.dp, end = 16.dp, bottom = 4.dp),
+                )
+            }
 
             item { MeGroupTitle("Playback") }
             item {
@@ -213,9 +294,124 @@ fun MeScreen(
             }
         }
     }
+
+    if (confirmAdult) {
+        AdultGateDialog(
+            onDismiss = { confirmAdult = false },
+            onContinue = {
+                confirmAdult = false
+                family = false
+                Store.familyMode = false
+                showFamilyToast(ctx, false)
+            },
+        )
+    }
 }
 
-private fun sizeText(bytes: Long): String = when {
+/**
+ * The stock app's `dialog_adult_restricted`: white card, dark text, Back on the left and the
+ * green Continue button on the right. Only the copy and colours matter here; it is a Compose
+ * dialog because the rest of the app has no XML layouts.
+ */
+@Composable
+private fun AdultGateDialog(onDismiss: () -> Unit, onContinue: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color.White)
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                "18+ Adults Only",
+                color = Color(0xFF333333),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "The content is restricted to\n18 and over",
+                color = Color(0xFF333333),
+                fontSize = 14.sp,
+                lineHeight = 20.sp,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Back",
+                    color = Color(0xFF333333),
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color(0xFFF2F3F5))
+                        .clickable(onClick = onDismiss)
+                        .padding(vertical = 9.dp),
+                )
+                Text(
+                    "Continue",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Accent)
+                        .clickable(onClick = onContinue)
+                        .padding(vertical = 9.dp),
+                )
+            }
+        }
+    }
+}
+
+/** White toast with the stock app's family icon, matching `toast_family_mode.xml`. */
+private fun showFamilyToast(ctx: Context, on: Boolean) {
+    val d = ctx.resources.displayMetrics.density
+    fun dp(v: Int) = (v * d).toInt()
+    runCatching {
+        val row = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(8).toFloat()
+                setColor(android.graphics.Color.WHITE)
+            }
+        }
+        row.addView(
+            ImageView(ctx).apply {
+                setImageResource(R.drawable.ic_family_mode_toast)
+                layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
+            }
+        )
+        row.addView(
+            TextView(ctx).apply {
+                text = if (on) "Family Mode is ON" else "Family Mode is OFF"
+                setTextColor(android.graphics.Color.rgb(16, 17, 20))
+                textSize = 14f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(dp(8), 0, 0, 0)
+            }
+        )
+        Toast(ctx.applicationContext).apply {
+            duration = Toast.LENGTH_SHORT
+            setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0, dp(96))
+            view = row
+        }.show()
+    }.onFailure {
+        Toast.makeText(
+            ctx,
+            if (on) "Family Mode is ON" else "Family Mode is OFF",
+            Toast.LENGTH_SHORT,
+        ).show()
+    }
+}
     bytes <= 0L -> "0 MB"
     bytes >= 1_000_000_000L -> String.format("%.2f GB", bytes / 1_000_000_000.0)
     else -> String.format("%.0f MB", bytes / 1_000_000.0)

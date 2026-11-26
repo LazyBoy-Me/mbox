@@ -66,6 +66,9 @@ object Api {
     private const val CATALOG_TTL = 30 * 60_000L
     private const val SEARCH_TTL = 10 * 60_000L
 
+    /** Family Mode flips the whole catalog's visibility; drop answers fetched under the old flag. */
+    fun clearCache() = responseCache.clear()
+
     @Suppress("UNCHECKED_CAST")
     fun <T> peek(key: String, ttlMs: Long = CATALOG_TTL): T? {
         val hit = responseCache[key] ?: return null
@@ -289,6 +292,7 @@ object Api {
             .map { it.trim() }.filter { it.isNotEmpty() },
         trailer = o.optJSONObject("trailer")?.optJSONObject("VideoAddress")?.optString("url").orEmpty(),
         still = o.optJSONObject("stills")?.optString("url").orEmpty(),
+        adult = o.optInt("restrictKid", 0) == 1,
     )
 
     private fun listOfSubjects(arr: org.json.JSONArray?): List<Subject> {
@@ -297,7 +301,10 @@ object Api {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val s = o.optJSONObject("subject") ?: o
-            if (s.optString("subjectId").isNotEmpty()) out.add(subjectOf(s))
+            if (s.optString("subjectId").isEmpty()) continue
+            val item = subjectOf(s)
+            if (Store.familyMode && item.adult) continue
+            out.add(item)
         }
         return out
     }
@@ -368,13 +375,82 @@ object Api {
             if (tParts.any { it == part }) hits += 2
             else if (tParts.any { it.startsWith(part) }) hits += 1
         }
+        // "spiderman" must find "Spider-Man" and "avengersendgame" must find
+        // "Avengers: Endgame"; the space-stripped forms are what make that work.
+        val tc = t.replace(" ", "")
+        val qc = q.replace(" ", "")
         return when {
             t == q -> 1000
-            t.startsWith(q) -> 700
-            t.contains(q) -> 500
+            tc == qc -> 980
+            t.startsWith(q) -> 800
+            tc.startsWith(qc) -> 760
+            t.contains(q) -> 600
+            (qc.length >= 3 && tc.contains(qc)) -> 560
             hits == 0 -> 0
             else -> 100 + hits * 25 + qParts.count { t.contains(it) } * 10
         }
+    }
+
+    // ---------------------------------------------------------------- suggestion words
+
+    private val adultWords = setOf(
+        "porn", "porno", "pornhub", "pornstars", "xxx", "xxnx", "xnxx", "xvideos", "sex",
+        "sexual", "sexy", "nude", "naked", "erotic", "erotica", "hentai", "bdsm", "fuck",
+        "fucked", "fucking", "fucks", "blowjob", "blowjobs", "handjob", "cum", "cumshot",
+        "creampie", "orgasm", "orgasms", "anal", "milf", "squirt", "squirted", "onlyfans",
+        "adult", "hardcore", "stepsis", "stepsister", "stepbrother", "stepdad", "stepmom",
+        "striptease", "threesome", "threesomes", "pussy", "dick", "cock", "tits", "boobs",
+        "ass", "bangbros", "brazzers", "blacked", "realitykings", "naughtyamerica",
+        "mofos", "twistys", "deeper", "virginity", "horny", "slut", "whore", "lesbian",
+        "gangbang", "camgirl", "webcam", "escort", "massage", "massages",
+    )
+
+    private fun looksAdult(text: String): Boolean {
+        val t = text.lowercase()
+        if (t.contains("18+")) return true
+        val tokens = t.split(Regex("[^a-z0-9]+")).filter { it.isNotEmpty() }
+        return tokens.any { it in adultWords }
+    }
+
+    /** Exact first, then prefix, word-start, contains; `[Hindi]` twins collapse onto one row. */
+    fun rankWords(words: List<String>, query: String): List<String> {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) return words
+        val seen = java.util.HashSet<String>()
+        val ranked = ArrayList<Pair<String, Int>>(words.size)
+        for (w in words) {
+            val key = w.trim().lowercase()
+            if (key.isEmpty() || !seen.add(key)) continue
+            if (Store.familyMode && looksAdult(w)) continue
+            val t = key
+            val tc = t.replace(Regex("[^a-z0-9]"), "")
+            val qc = q.replace(Regex("[^a-z0-9]"), "")
+            val score = when {
+                t == q -> 1000
+                tc == qc -> 980
+                t.startsWith(q) -> 800
+                (qc.length >= 2 && tc.startsWith(qc)) -> 760
+                t.split(' ').any { it.startsWith(q) } -> 600
+                t.contains(q) -> 400
+                (qc.length >= 3 && tc.contains(qc)) -> 380
+                else -> 0
+            }
+            if (score > 0) ranked.add(w.trim() to score)
+        }
+        ranked.sortWith(
+            compareByDescending<Pair<String, Int>> { it.second }
+                .thenBy { it.first.length }
+        )
+        // "Batman" and "Batman [Hindi]" are the same show; keep the plain title once.
+        val plain = ranked.map { it.first }
+        val plainKeys = plain.filter { !it.contains("[hindi]", true) }
+            .map { it.lowercase() }.toSet()
+        return plain.filter { w ->
+            if (w.contains("[hindi]", true)) {
+                val base = w.replace(Regex("\\s*\\[hindi\\]", RegexOption.IGNORE_CASE), "").trim().lowercase()
+                base !in plainKeys
+            } else true
+        }.take(12)
     }
 
     /** Ranks a result list against the query and drops blocks with no textual match at all. */
@@ -437,7 +513,10 @@ object Api {
                         for (j in 0 until subjArr.length()) {
                             val o = subjArr.optJSONObject(j) ?: continue
                             val s = o.optJSONObject("subject") ?: o
-                            if (s.optString("subjectId").isNotEmpty()) raw.add(subjectOf(s))
+                            if (s.optString("subjectId").isEmpty()) continue
+                            val item = subjectOf(s)
+                            if (Store.familyMode && item.adult) continue
+                            raw.add(item)
                         }
                     }
                     val people = ArrayList<Staff>()
@@ -588,6 +667,34 @@ object Api {
         listOfSubjects(holder.optJSONArray("items"))
         }
     }
+
+    /**
+     * The stock app has no "Midnight" tab: 18+ titles are mixed into the catalog and Family Mode
+     * hides them. Their filter list does not publish an Adult genre either, but the mobile list
+     * endpoint accepts it, so this is the same request the stock app makes with genre=Adult.
+     */
+    suspend fun midnight(page: Int = 1, sort: String = "Hottest"): MidnightPage =
+        cached("midnight|$sort|$page", SEARCH_TTL) {
+        withContext(Dispatchers.IO) {
+            if (Store.familyMode) return@withContext MidnightPage()
+            ensureToken()
+            val body = JSONObject()
+                .put("page", page)
+                .put("perPage", 20)
+                .put("subjectType", 0)
+                .put("genre", "Adult")
+                .put("country", "All")
+                .put("year", "All")
+                .put("sort", sort)
+                .toString()
+            val data = runCatching { call("/subject-api/list", "POST", body) }.getOrNull()
+                ?: return@withContext MidnightPage()
+            val payload = data.optJSONObject("data") ?: return@withContext MidnightPage()
+            val items = listOfSubjects(payload.optJSONArray("items"))
+            val more = payload.optJSONObject("pager")?.optBoolean("hasMore") == true
+            MidnightPage(items, more)
+        }
+        }
 
     /** Ranking boards ("TOP Movies", "Bollywood", …). */
     suspend fun rankBoards(): List<RankBoard> = cached("rank-boards") {
@@ -874,7 +981,10 @@ object Api {
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val sub = o.optJSONObject("subject") ?: o
-            if (sub.optString("subjectId").isNotEmpty()) out.add(subjectOf(sub))
+            if (sub.optString("subjectId").isEmpty()) continue
+            val rec = subjectOf(sub)
+            if (Store.familyMode && rec.adult) continue
+            out.add(rec)
         }
         out
         }
@@ -882,10 +992,10 @@ object Api {
 
     /** Live search-as-you-type suggestions (words), same endpoint the stock app uses. */
     suspend fun suggestWords(keyword: String): List<String> = cached(
-        "suggest|${keyword.trim().lowercase()}", SEARCH_TTL,
+        "suggest|${keyword.trim().lowercase()}|${Store.familyMode}", SEARCH_TTL,
     ) {
         withContext(Dispatchers.IO) {
-        if (keyword.trim().length < 2) return@withContext emptyList()
+        if (keyword.trim().isEmpty()) return@withContext emptyList()
         ensureToken()
         val q = URLEncoder.encode(keyword.trim(), "UTF-8")
         val data = runCatching { call("/subject-api/search-suggest?host=api6.aoneroom.com&keyword=$q") }
@@ -894,9 +1004,11 @@ object Api {
         val out = ArrayList<String>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val w = o.optString("word")
-            if (w.isNotEmpty() && out.none { it.equals(w, true) }) out.add(w)
-            if (out.size >= 10) break
+            val w = clean(o.optString("word"))
+            if (w.isEmpty() || out.any { it.equals(w, true) }) continue
+            if (Store.familyMode && looksAdult(w)) continue
+            out.add(w)
+            if (out.size >= 12) break
         }
         out
         }

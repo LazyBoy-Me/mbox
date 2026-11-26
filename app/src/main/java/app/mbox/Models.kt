@@ -24,6 +24,8 @@ data class Subject(
     val subtitleLangs: List<String> = emptyList(),
     val trailer: String = "",
     val still: String = "",
+    /** `restrictKid` = 1 in the stock API: an 18+ title that Family Mode hides. */
+    val adult: Boolean = false,
 ) {
     val isSeries: Boolean get() = type == 2
 }
@@ -142,6 +144,12 @@ data class FilterOptions(
 /** A ranking board ("TOP Movies", "Bollywood", …) from `tab/ranking-list`. */
 data class RankBoard(val id: String, val name: String)
 
+/** One page of the 18+ "Midnight" feed (`genre=Adult` on the mobile list endpoint). */
+data class MidnightPage(
+    val items: List<Subject> = emptyList(),
+    val hasMore: Boolean = false,
+)
+
 /** One entry of the on-device watch history. */
 data class HistoryEntry(
     val id: String,
@@ -155,6 +163,8 @@ data class HistoryEntry(
     val position: Long,
     val duration: Long,
     val updated: Long,
+    /** `restrictKid` = 1: Family Mode must not show this row. */
+    val adult: Boolean = false,
 ) {
     val progress: Float
         get() = if (duration <= 0) 0f else (position.toFloat() / duration).coerceIn(0f, 1f)

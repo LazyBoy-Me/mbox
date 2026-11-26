@@ -64,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -518,6 +519,14 @@ fun WatchScreen(
             sheet = emptyList()
             person = null
             resumeAsk = null
+            // Home must not upgrade the floating window to a system PiP window.
+            activity?.let { act ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    runCatching {
+                        act.setPictureInPictureParams(Pip.params(act, autoEnter = false))
+                    }
+                }
+            }
         } else {
             controlsVisible = true
         }
@@ -639,7 +648,7 @@ fun WatchScreen(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching {
                 act.setPictureInPictureParams(
-                    Pip.params(act, autoEnter = Pip.active && Pip.playing && !inPip)
+                    Pip.params(act, autoEnter = Pip.active && Pip.playing && !inPip && !mini)
                 )
             }
         }
@@ -658,6 +667,7 @@ fun WatchScreen(
     val density = LocalDensity.current
     val miniWidthPx = with(density) { 200.dp.roundToPx() }
     val miniBottomPx = with(density) { 74.dp.roundToPx() }
+    val miniStartPx = with(density) { 12.dp.roundToPx() }
     Layout(
         modifier = Modifier.fillMaxSize().then(if (mini) Modifier else Modifier.background(Bg)),
         content = {
@@ -665,6 +675,13 @@ fun WatchScreen(
         Box(
             Modifier
                 .fillMaxWidth()
+                .then(
+                    if (mini) {
+                        Modifier
+                            .shadow(10.dp, RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(8.dp))
+                    } else Modifier
+                )
                 .background(Color.Black),
         ) {
             AndroidView(
@@ -1314,6 +1331,24 @@ fun WatchScreen(
                         modifier = Modifier.size(13.dp),
                     )
                 }
+                // Thin progress line, same accent green as the full player's seek bar.
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .align(Alignment.BottomCenter)
+                        .background(Color(0x33000000)),
+                ) {
+                    val frac = if (durationMs > 0) {
+                        (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+                    } else 0f
+                    Box(
+                        Modifier
+                            .fillMaxWidth(frac)
+                            .height(2.dp)
+                            .background(Accent),
+                    )
+                }
             }
         }
 
@@ -1554,7 +1589,7 @@ fun WatchScreen(
                 val video = measurables.first().measure(Constraints.fixed(w, h))
                 layout(width, height) {
                     video.place(
-                        x = (width - w) / 2,
+                        x = miniStartPx.coerceAtMost((width - w).coerceAtLeast(0)),
                         y = (height - h - miniBottomPx).coerceAtLeast(0),
                     )
                 }

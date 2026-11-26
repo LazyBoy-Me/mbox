@@ -218,6 +218,20 @@ fun PosterCard(
                         .padding(horizontal = 5.dp, vertical = 1.dp),
                 )
             }
+            if (subject.adult) {
+                Text(
+                    "18+",
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(5.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(Color(0xFFE53935))
+                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                )
+            }
             if (subject.rating.isNotBlank() && subject.rating != "0" && subject.rating != "null") {
                 Text(
                     "★ ${subject.rating}",

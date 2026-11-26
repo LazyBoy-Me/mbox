@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -43,10 +44,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.mbox.Api
@@ -58,6 +62,7 @@ import app.mbox.SearchTab
 import app.mbox.Store
 import app.mbox.Subject
 import coil.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
 @Composable
@@ -81,6 +86,9 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
     }
     var loading by remember { mutableStateOf(false) }
     var live by remember { mutableStateOf<List<String>>(emptyList()) }
+    var liveLoading by remember { mutableStateOf(false) }
+    // Every answer ever received this session; typing/backspacing is filtered locally first.
+    var pool by remember { mutableStateOf<List<String>>(emptyList()) }
     var liveSubjects by remember { mutableStateOf<List<Subject>>(emptyList()) }
     var browseAll by remember { mutableStateOf(false) }
     var history by remember { mutableStateOf(Store.searchHistory()) }
@@ -104,29 +112,92 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         if (hotSections.isEmpty() && hotWords.isEmpty()) {
-            val rank = runCatching { Api.searchRank() }.getOrNull()
+            val rank = try {
+                Api.searchRank()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
             hotSections = rank?.sections.orEmpty()
             hotWords = rank?.words.orEmpty()
         }
         if (options.genres.isEmpty()) {
-            options = runCatching { Api.filterOptions() }.getOrDefault(FilterOptions())
+            options = try {
+                Api.filterOptions()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                FilterOptions()
+            }
         }
     }
 
-    LaunchedEffect(query) {
+    var familySeen by remember { mutableStateOf(Store.familyEpoch) }
+    LaunchedEffect(Store.familyEpoch) {
+        // Family Mode hides 18+ rows everywhere; the effects below re-ask because their keys
+        // include the epoch and Store cleared the response cache.
+        if (familySeen == Store.familyEpoch) return@LaunchedEffect
+        familySeen = Store.familyEpoch
+        pool = emptyList()
+        live = emptyList()
+        liveSubjects = emptyList()
+        if (Store.familyMode) {
+            // Hide already-rendered 18+ rows immediately, before the refreshed answer lands.
+            groups = groups.map { g -> g.copy(items = g.items.filter { !it.adult }) }
+            browseItems = browseItems.filter { !it.adult }
+        }
+    }
+
+    // Live suggestion list. Typing must never wait for the network: the pool we already have is
+    // filtered locally on every key press, the request is debounced, and results are merged only
+    // when they belong to the query that is still in the box.
+    LaunchedEffect(query, Store.familyEpoch) {
         val q = query.trim()
-        if (q.length < 2) {
+        if (q.isEmpty()) {
             live = emptyList()
+            liveLoading = false
+            return@LaunchedEffect
+        }
+        val local = Api.rankWords(live + pool + history, q)
+        if (local.isNotEmpty()) live = local
+        // The endpoint answers even for one letter (mostly studio/adult junk), so keep the adult
+        // filter on and give the single-key case a little more time before asking.
+        if (local.isEmpty()) liveLoading = true
+        delay(if (q.length < 2) 300 else 140)
+        try {
+            val fresh = Api.suggestWords(q)
+            if (query.trim() != q) return@LaunchedEffect
+            pool = (fresh + pool).distinctBy { it.lowercase() }.take(80)
+            val ranked = Api.rankWords(fresh, q)
+            if (ranked.isNotEmpty() || local.isEmpty()) live = ranked
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        } finally {
+            if (query.trim() == q) liveLoading = false
+        }
+    }
+
+    // Poster "top results" are expensive (two search calls), so they arrive after the word list
+    // and are allowed to be cancelled by the next keystroke without clearing the suggestions.
+    LaunchedEffect(query, submitted, Store.familyEpoch) {
+        val q = query.trim()
+        if (q.length < 2 || q == submitted.trim()) {
             liveSubjects = emptyList()
             return@LaunchedEffect
         }
-        // Typing cancels the previous effect, so a stale answer can never overwrite a newer one.
-        delay(250)
-        live = runCatching { Api.suggestWords(q) }.getOrDefault(emptyList())
-        liveSubjects = runCatching { Api.search(q) }.getOrDefault(emptyList()).take(3)
+        delay(450)
+        try {
+            val hits = Api.search(q)
+            if (query.trim() == q) liveSubjects = hits.take(3)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+        }
     }
 
-    LaunchedEffect(submitted, tab) {
+    LaunchedEffect(submitted, tab, Store.familyEpoch) {
         if (submitted.isBlank()) return@LaunchedEffect
         Api.cachedSearchV2(submitted, tab)?.let { page ->
             tabs = page.tabs
@@ -135,13 +206,19 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
             return@LaunchedEffect
         }
         loading = groups.isEmpty()
-        val page = runCatching { Api.searchV2(submitted, tab) }.getOrNull()
+        val page = try {
+            Api.searchV2(submitted, tab)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
         tabs = page?.tabs.orEmpty()
         groups = page?.groups.orEmpty()
         loading = false
     }
 
-    LaunchedEffect(browsing, fGenre, fCountry, fYear, fSort) {
+    LaunchedEffect(browsing, fGenre, fCountry, fYear, fSort, Store.familyEpoch) {
         if (!browsing) return@LaunchedEffect
         val cached = Api.cachedFiltered(0, fGenre, fCountry, fYear, fSort)
         if (cached != null) {
@@ -150,9 +227,13 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
             return@LaunchedEffect
         }
         loading = browseItems.isEmpty()
-        browseItems = runCatching {
+        browseItems = try {
             Api.filtered(0, fGenre, fCountry, fYear, fSort)
-        }.getOrDefault(emptyList())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            emptyList()
+        }
         loading = false
     }
 
@@ -163,6 +244,12 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
         submitted = w
         browsing = false
         live = emptyList()
+        liveSubjects = emptyList()
+        liveLoading = false
+        // A new submit must not paint the previous query's hits while the new page loads.
+        groups = emptyList()
+        tabs = emptyList()
+        loading = true
         Store.addSearch(w)
         history = Store.searchHistory()
         // Enter on the keyboard (or tapping Search / a suggestion) closes the IME and drops focus.
@@ -217,7 +304,12 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                         onValueChange = {
                             query = it
                             browsing = false
-                            if (it.isEmpty()) submitted = ""
+                            if (it.isEmpty()) {
+                                submitted = ""
+                                groups = emptyList()
+                                tabs = emptyList()
+                                loading = false
+                            }
                         },
                         singleLine = true,
                         textStyle = TextStyle(color = TextMain, fontSize = 13.sp),
@@ -227,12 +319,21 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
+                if (liveLoading) {
+                    CircularProgressIndicator(
+                        color = AccentSoft,
+                        strokeWidth = 1.5.dp,
+                        modifier = Modifier.size(12.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
                 if (query.isNotEmpty()) {
                     Box(
                         Modifier.size(22.dp).clickable {
                             query = ""
                             submitted = ""
                             live = emptyList()
+                            liveSubjects = emptyList()
                             browsing = false
                         },
                         contentAlignment = Alignment.Center,
@@ -266,7 +367,21 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                 onFilter = { showFilter = true },
             )
 
-            loading -> LoadingBox()
+            // Typing after a search must show the new suggestions, not the previous result page.
+            query.trim().isNotEmpty() && query.trim() != submitted.trim() -> LiveSuggestions(
+                query = query.trim(),
+                words = live,
+                subjects = liveSubjects,
+                loading = liveLoading,
+                onOpen = onOpen,
+                onWord = { word ->
+                    query = word
+                    submit(word)
+                },
+                onSubmit = { submit(query) },
+            )
+
+            loading && groups.isEmpty() -> LoadingBox()
 
             submitted.isNotBlank() -> Results(
                 tabs = tabs,
@@ -277,28 +392,6 @@ fun SearchScreen(onOpen: (Subject) -> Unit, onBack: () -> Unit) {
                 onPerson = { person = it },
                 onFilter = { showFilter = true },
             )
-
-            (live.isNotEmpty() || liveSubjects.isNotEmpty()) &&
-                query.trim() != submitted.trim() -> LazyColumn {
-                if (liveSubjects.isNotEmpty()) {
-                    item { SectionHeader("Top results") }
-                    items(liveSubjects.size) { i ->
-                        ResultRow(liveSubjects[i], 1) {
-                            submit(liveSubjects[i].title)
-                            onOpen(liveSubjects[i])
-                        }
-                    }
-                }
-                if (live.isNotEmpty()) {
-                    item { SectionHeader("Suggestions") }
-                    items(live.size) { i ->
-                        SuggestionRow(live[i]) {
-                            query = live[i]
-                            submit(live[i])
-                        }
-                    }
-                }
-            }
 
             else -> Landing(
                 history = history,
@@ -430,11 +523,93 @@ private fun Chips(words: List<String>, onClick: (String) -> Unit) {
     }
 }
 
+/**
+ * The live dropdown, in the stock app's order: poster top-results first (they arrive late), then
+ * the full-title word rows with the typed part highlighted, then an explicit "see all" row.
+ */
 @Composable
-private fun SuggestionRow(word: String, onClick: () -> Unit) {
+private fun LiveSuggestions(
+    query: String,
+    words: List<String>,
+    subjects: List<Subject>,
+    loading: Boolean,
+    onOpen: (Subject) -> Unit,
+    onWord: (String) -> Unit,
+    onSubmit: () -> Unit,
+) {
+    LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
+        if (subjects.isNotEmpty()) {
+            item { SectionHeader("Top results") }
+            items(subjects.size) { i ->
+                ResultRow(subjects[i], 1) { onOpen(subjects[i]) }
+            }
+        }
+        item {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 14.dp, end = 14.dp, top = 12.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Suggestions",
+                    color = TextMain,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (loading) {
+                    CircularProgressIndicator(
+                        color = AccentSoft,
+                        strokeWidth = 1.5.dp,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
+            }
+        }
+        if (words.isEmpty() && !loading) {
+            item {
+                Text(
+                    "No title starts with “$query” — press Search to look inside descriptions.",
+                    color = TextMute,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                )
+            }
+        }
+        items(words.size) { i ->
+            SuggestionRow(words[i], query) { onWord(words[i]) }
+        }
+        item {
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onSubmit)
+                    .padding(horizontal = 14.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_search),
+                    contentDescription = null,
+                    tint = AccentSoft,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "See all results for “$query”",
+                    color = AccentSoft,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SuggestionRow(word: String, query: String, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
@@ -444,8 +619,35 @@ private fun SuggestionRow(word: String, onClick: () -> Unit) {
             modifier = Modifier.size(15.dp),
         )
         Spacer(Modifier.width(10.dp))
-        Text(word, color = TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Box(Modifier.weight(1f)) {
+            HighlightedTitle(word, query)
+        }
+        Spacer(Modifier.width(6.dp))
+        Icon(
+            painter = painterResource(R.drawable.ic_arrow_right_white_small),
+            contentDescription = null,
+            tint = TextMute,
+            modifier = Modifier.size(11.dp),
+        )
     }
+}
+
+@Composable
+private fun HighlightedTitle(text: String, query: String) {
+    val q = query.trim()
+    val at = if (q.isEmpty()) -1 else text.indexOf(q, ignoreCase = true)
+    if (at < 0) {
+        Text(text, color = TextDim, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        return
+    }
+    val styled = buildAnnotatedString {
+        append(text.substring(0, at))
+        withStyle(SpanStyle(color = AccentSoft, fontWeight = FontWeight.Bold)) {
+            append(text.substring(at, at + q.length))
+        }
+        append(text.substring(at + q.length))
+    }
+    Text(styled, color = TextDim, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
 }
 
 @Composable

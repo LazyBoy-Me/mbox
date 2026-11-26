@@ -56,6 +56,7 @@ fun HomeScreen(
     onResume: (app.mbox.HistoryEntry) -> Unit,
     onSearch: () -> Unit,
     onDownloads: () -> Unit,
+    onMidnight: () -> Unit,
 ) {
     // Seed from Api's in-memory cache: returning to Home after Search or the player is instant
     // and costs no request, which is the whole point of keeping the response cache.
@@ -72,6 +73,7 @@ fun HomeScreen(
     var loaded by remember { mutableStateOf(sections.isNotEmpty()) }
     var error by remember { mutableStateOf<String?>(null) }
     var history by remember { mutableStateOf(Store.history().take(10)) }
+    var midnight by remember { mutableStateOf<List<Subject>>(emptyList()) }
     var showRank by remember { mutableStateOf(false) }
     var showBrowse by remember { mutableStateOf(false) }
 
@@ -86,6 +88,36 @@ fun HomeScreen(
         }
         if (genres.isEmpty()) {
             genres = runCatching { Api.filterOptions().genres }.getOrDefault(emptyList())
+        }
+        if (!Store.familyMode) {
+            midnight = runCatching { Api.midnight(1).items }.getOrDefault(emptyList())
+        }
+        history = Store.history().take(10)
+        loaded = true
+    }
+
+    var familySeen by remember { mutableStateOf(Store.familyEpoch) }
+    LaunchedEffect(Store.familyEpoch) {
+        if (familySeen == Store.familyEpoch) return@LaunchedEffect
+        familySeen = Store.familyEpoch
+        // The cache was cleared with the flag; every list must be fetched again. While the new
+        // answer is in flight, drop the rows that are now illegal instead of showing them.
+        if (Store.familyMode) {
+            sections = sections.map { sec -> sec.copy(items = sec.items.filter { !it.adult }) }
+            genreItems = genreItems.filter { !it.adult }
+            midnight = emptyList()
+        }
+        error = null
+        sections = runCatching { Api.hotSections() }.getOrDefault(sections)
+        genres = runCatching { Api.filterOptions().genres }.getOrDefault(genres)
+        if (!Store.familyMode) {
+            midnight = runCatching { Api.midnight(1).items }.getOrDefault(emptyList())
+        }
+        if (category != "All") {
+            genreLoading = true
+            genreItems = runCatching { Api.filtered(subjectType = 0, genre = category) }
+                .getOrDefault(emptyList())
+            genreLoading = false
         }
         history = Store.history().take(10)
         loaded = true
@@ -184,6 +216,10 @@ fun HomeScreen(
                     val hero = movies.ifEmpty { all }.take(6)
                     if (hero.isNotEmpty()) {
                         item { HeroPager(hero, onOpen) }
+                    }
+                    if (!Store.familyMode && midnight.isNotEmpty()) {
+                        item { SectionHeader("🔞 Midnight", "See all") { onMidnight() } }
+                        item { HorizontalPosterRow(midnight.take(12), onOpen) }
                     }
                     item { TipBanner(onDownloads) }
                     if (history.isNotEmpty()) {

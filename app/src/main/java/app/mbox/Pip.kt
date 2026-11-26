@@ -26,6 +26,8 @@ object Pip {
     @Volatile var playing: Boolean = false
     @Volatile var hasNext: Boolean = false
     @Volatile var title: String = ""
+    /** A floating mini window is on screen; Home must not turn it into a PiP window. */
+    @Volatile var mini: Boolean = false
 
     var onToggle: (() -> Unit)? = null
     var onNext: (() -> Unit)? = null
