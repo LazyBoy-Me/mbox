@@ -93,6 +93,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.dash.DashMediaSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
@@ -158,7 +159,15 @@ fun WatchScreen(
     val ctx = LocalContext.current
     val activity = remember(ctx) { ctx.activityOrNull() }
     val scope = rememberCoroutineScope()
-    val player = remember { ExoPlayer.Builder(ctx).build() }
+    // Decoder fallback matters on phones whose first-choice hardware decoder rejects a stream
+    // (common with HLS/HEVC variants): Media3 then retries another decoder instead of ending
+    // playback with a decoder error. Without it some devices close the player as soon as it starts.
+    val player = remember {
+        ExoPlayer.Builder(
+            ctx,
+            DefaultRenderersFactory(ctx).setEnableDecoderFallback(true),
+        ).build()
+    }
 
     // ------------------------------------------------------------------ catalog
     var detail by remember { mutableStateOf(Subject(title = spec.title, type = if (spec.series) 2 else 1)) }
@@ -183,6 +192,7 @@ fun WatchScreen(
     var status by remember { mutableStateOf<String?>("Preparing stream…") }
     var error by remember { mutableStateOf<String?>(null) }
     var retryKey by remember { mutableStateOf(0) }
+    var decoderRetries by remember { mutableStateOf(0) }
     var pendingSeek by remember { mutableStateOf(spec.startMs) }
 
     // ------------------------------------------------------------------ chrome
@@ -340,13 +350,18 @@ fun WatchScreen(
             error = "Couldn't load the stream list. Check your connection and retry."
             return@LaunchedEffect
         }
-        streams = list
         if (list.isEmpty()) {
+            streams = emptyList()
             status = null
             error = "No stream available for this title."
             return@LaunchedEffect
         }
-        setSource(orderCandidates(list).first(), start)
+        // Keep the same order the player will try, so a decoder failure can advance to the next
+        // entry instead of stopping on the same broken quality.
+        val ordered = orderCandidates(list)
+        streams = ordered
+        decoderRetries = 0
+        setSource(ordered.first(), start)
     }
 
     // Offer "resume from 12:34" once the real title id is known, never for a few stray seconds.
@@ -390,6 +405,7 @@ fun WatchScreen(
 
             override fun onPlaybackStateChanged(state: Int) {
                 buffering = state == Player.STATE_BUFFERING
+                if (state == Player.STATE_READY) decoderRetries = 0
                 if (state == Player.STATE_ENDED) {
                     controlsVisible = true
                     if (spec.series && ep < maxEp) nextIn = 5
@@ -397,7 +413,22 @@ fun WatchScreen(
             }
 
             override fun onPlayerError(e: PlaybackException) {
-                error = when (e.errorCode) {
+                // A hardware decoder that refuses this stream used to end playback on the first
+                // frame. Walk to the next quality instead; the list is ordered H.264-first.
+                val code = e.errorCode
+                val decoderProblem = code == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+                    code == PlaybackException.ERROR_CODE_DECODING_FAILED
+                if (decoderProblem && decoderRetries < 2) {
+                    val index = streams.indexOfFirst { it === current }
+                    val next = streams.getOrNull(index + 1)
+                    if (next != null) {
+                        decoderRetries += 1
+                        setSource(next, player.currentPosition.coerceAtLeast(0))
+                        toast = "Switched to ${next.name}"
+                        return
+                    }
+                }
+                error = when (code) {
                     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> "The CDN refused this stream (HTTP error)."
                     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "Network connection lost."
                     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED -> "This device can't decode this codec. Try another quality."

@@ -243,7 +243,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                     )
 
                     3 -> MeScreen(
-                        version = "2.0",
+                        version = "2.0.1",
                         onDownloads = { tab = 2 },
                         onOpen = { open(it) },
                         onResume = { resume(it) },
