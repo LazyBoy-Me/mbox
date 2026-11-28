@@ -88,6 +88,37 @@ object Store {
         get() = p()?.getString("lastCrash", "") ?: ""
         set(v) { p()?.edit()?.putString("lastCrash", v)?.commit() }
 
+    /**
+     * Breadcrumb trail for the player.
+     *
+     * A native crash (SIGSEGV inside a codec or the surface, which is what a "keeps stopping"
+     * dialog with no Java trace looks like) never reaches the uncaught handler, so [lastCrash]
+     * stays empty. Each step is written with `commit()` so the next launch can still show how far
+     * the player got before the ROM killed the process.
+     */
+    fun step(tag: String) {
+        val sp = p() ?: return
+        val stamp = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
+            .format(java.util.Date())
+        val old = sp.getString("steps", "").orEmpty()
+        val lines = (if (old.isBlank()) emptyList() else old.lines()) + "$stamp $tag"
+        sp.edit().putString("steps", lines.takeLast(40).joinToString("\n")).commit()
+    }
+
+    val stepsText: String
+        get() = p()?.getString("steps", "").orEmpty()
+
+    fun clearSteps() {
+        p()?.edit()?.remove("steps")?.commit()
+    }
+
+    /** Last run entered the player and never reported leaving it — it died in there. */
+    val diedInPlayer: Boolean
+        get() {
+            val last = stepsText.lines().lastOrNull { it.isNotBlank() } ?: return false
+            return last.contains("player") && !last.contains("player closed")
+        }
+
     // ------------------------------------------------------------------ history
 
     private fun readHistory(): MutableList<HistoryEntry> {

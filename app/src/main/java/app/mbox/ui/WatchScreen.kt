@@ -12,6 +12,7 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.util.Rational
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
@@ -163,10 +164,14 @@ fun WatchScreen(
     // (common with HLS/HEVC variants): Media3 then retries another decoder instead of ending
     // playback with a decoder error. Without it some devices close the player as soon as it starts.
     val player = remember {
+        Store.step("exo building")
         ExoPlayer.Builder(
             ctx,
             DefaultRenderersFactory(ctx).setEnableDecoderFallback(true),
-        ).build()
+        ).build().also { Store.step("exo built") }
+    }
+    remember(spec.baseId, spec.se, spec.ep) {
+        Store.step("player open ${spec.title.take(40)}")
     }
 
     // ------------------------------------------------------------------ catalog
@@ -266,6 +271,7 @@ fun WatchScreen(
                 item.url.contains(".mpd", true) -> DashMediaSource.Factory(ds).createMediaSource(mediaItem)
                 else -> ProgressiveMediaSource.Factory(ds).createMediaSource(mediaItem)
             }
+            Store.step("attach source")
             player.setMediaSource(source)
             player.prepare()
             if (startMs > 0) player.seekTo(startMs)
@@ -274,6 +280,7 @@ fun WatchScreen(
             current = item
             error = null
             status = null
+            Store.step("source set ${item.resolution}p ${item.codec}")
         } catch (t: Throwable) {
             status = null
             error = "This stream couldn't start (${t.javaClass.simpleName}). Try another quality or episode."
@@ -304,9 +311,12 @@ fun WatchScreen(
         val wifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true ||
             caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true
         val target = when {
-            wifi -> 1080
-            Store.dataSaver -> 480
-            else -> 720
+            // 1080p H.264 high-profile is what some low-end MIUI phones fail to open at all
+            // (the codec dies natively, so there is no Java error to catch). Start at 720p on
+            // Wi-Fi and 480p on mobile; the quality menu can still pick 1080p by hand.
+            wifi -> 720
+            Store.dataSaver -> 360
+            else -> 480
         }
         val pool = list.filter { it.resolution <= target }.ifEmpty { list }
         val best = pool.maxOf { it.resolution }
@@ -412,7 +422,12 @@ fun WatchScreen(
                 }
             }
 
+            override fun onRenderedFirstFrame() {
+                Store.step("first frame")
+            }
+
             override fun onPlayerError(e: PlaybackException) {
+                Store.step("player error ${e.errorCodeName}")
                 // A hardware decoder that refuses this stream used to end playback on the first
                 // frame. Walk to the next quality instead; the list is ordered H.264-first.
                 val code = e.errorCode
@@ -439,6 +454,7 @@ fun WatchScreen(
         player.addListener(listener)
         onDispose {
             player.removeListener(listener)
+            Store.step("player closed")
             player.release()
         }
     }
@@ -578,14 +594,6 @@ fun WatchScreen(
             sheet = emptyList()
             person = null
             resumeAsk = null
-            // Home must not upgrade the floating window to a system PiP window.
-            activity?.let { act ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    runCatching {
-                        act.setPictureInPictureParams(Pip.params(act, autoEnter = false))
-                    }
-                }
-            }
         } else {
             controlsVisible = true
         }
@@ -689,28 +697,17 @@ fun WatchScreen(
             Pip.onToggle = null
             Pip.onNext = null
             Pip.onBack10 = null
-            activity?.let { act ->
-                runCatching {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        act.setPictureInPictureParams(Pip.params(act, autoEnter = false))
-                    }
-                }
-            }
         }
     }
 
-    LaunchedEffect(isPlaying, ep, maxEp, detail.title, inPip) {
+    LaunchedEffect(isPlaying, ep, maxEp, detail.title) {
         Pip.playing = isPlaying
         Pip.hasNext = spec.series && ep < maxEp
         Pip.title = detail.title.ifBlank { spec.title }
-        val act = activity ?: return@LaunchedEffect
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            runCatching {
-                act.setPictureInPictureParams(
-                    Pip.params(act, autoEnter = Pip.active && Pip.playing && !inPip && !mini)
-                )
-            }
-        }
+        // Deliberately no setPictureInPictureParams() here. On MIUI/Transsion ROMs updating the
+        // PiP params with auto-enter while the activity is not in PiP can kill the process
+        // without a Java stack trace ("MBox keeps stopping" over the launcher). The system PiP
+        // window is only requested from the explicit PiP button (enterPip) and the Home gesture.
     }
 
     LaunchedEffect(inPip) {
@@ -745,7 +742,10 @@ fun WatchScreen(
         ) {
             AndroidView(
                 factory = { c ->
-                    PlayerView(c).apply {
+                    // Inflated from XML because surface_type=texture_view can only be set as a
+                    // constructor attribute. A SurfaceView crashes the whole process on some
+                    // MIUI builds the moment the player screen appears.
+                    (LayoutInflater.from(c).inflate(R.layout.view_player, null) as PlayerView).apply {
                         this.player = player
                         useController = false
                         keepScreenOn = true
@@ -1645,9 +1645,9 @@ fun WatchScreen(
             mini -> {
                 val w = miniWidthPx.coerceAtMost(width)
                 val h = (w * 9 / 16).coerceAtMost(height)
-                val video = measurables.first().measure(Constraints.fixed(w, h))
+                val video = measurables.firstOrNull()?.measure(Constraints.fixed(w, h))
                 layout(width, height) {
-                    video.place(
+                    video?.place(
                         x = miniStartPx.coerceAtMost((width - w).coerceAtLeast(0)),
                         y = (height - h - miniBottomPx).coerceAtLeast(0),
                     )
@@ -1655,17 +1655,17 @@ fun WatchScreen(
             }
 
             fullscreen || inPip -> {
-                val video = measurables.first().measure(Constraints.fixed(width, height))
-                layout(width, height) { video.place(0, 0) }
+                val video = measurables.firstOrNull()?.measure(Constraints.fixed(width, height))
+                layout(width, height) { video?.place(0, 0) }
             }
 
             else -> {
                 val videoHeight = width * 9 / 16
-                val video = measurables.first().measure(Constraints.fixed(width, videoHeight))
+                val video = measurables.firstOrNull()?.measure(Constraints.fixed(width, videoHeight))
                 val details = measurables.getOrNull(1)
                     ?.measure(Constraints.fixed(width, (height - videoHeight).coerceAtLeast(0)))
                 layout(width, height) {
-                    video.place(0, 0)
+                    video?.place(0, 0)
                     details?.place(0, videoHeight)
                 }
             }

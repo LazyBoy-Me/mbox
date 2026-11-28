@@ -39,6 +39,11 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalContext
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import app.mbox.HistoryEntry
 import app.mbox.ui.Bg
 import app.mbox.ui.DownloadsScreen
@@ -49,6 +54,7 @@ import app.mbox.ui.MidnightScreen
 import app.mbox.ui.SearchScreen
 import app.mbox.ui.TextMain
 import app.mbox.ui.TextMute
+import app.mbox.ui.CrashDialog
 import app.mbox.ui.WatchScreen
 
 class MainActivity : ComponentActivity() {
@@ -210,6 +216,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
     }
 
     fun open(s: Subject) {
+        Store.step("open ${s.title.take(40)} type=${s.type}")
         mini = false
         playback = PlaySpec(
             baseId = s.id,
@@ -243,7 +250,7 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                     )
 
                     3 -> MeScreen(
-                        version = "2.0.2",
+                        version = "2.0.3",
                         onDownloads = { tab = 2 },
                         onOpen = { open(it) },
                         onResume = { resume(it) },
@@ -277,6 +284,43 @@ private fun App(inPip: Boolean, deepLink: String?, onLinkUsed: () -> Unit) {
                 )
             }
         }
+    }
+
+    // If the previous run died, put the trace on screen instead of burying it under Me → About.
+    // This phone has no adb, so this dialog plus Copy is the only way to get the stack back.
+    // `diedInPlayer` also catches native crashes, where no Java trace exists at all.
+    val appCtx = LocalContext.current
+    var launchCrash by remember {
+        mutableStateOf(
+            if (Store.lastCrash.isNotBlank() || Store.diedInPlayer) {
+                buildString {
+                    if (Store.lastCrash.isNotBlank()) {
+                        append(Store.lastCrash)
+                        append("\n\n")
+                    }
+                    append("--- steps ---\n")
+                    append(Store.stepsText)
+                }
+            } else ""
+        )
+    }
+    if (launchCrash.isNotBlank()) {
+        CrashDialog(
+            text = launchCrash,
+            title = if (Store.lastCrash.isNotBlank()) "MBox crashed last time"
+            else "Last run ended in the player",
+            onDismiss = { launchCrash = "" },
+            onClear = {
+                Store.lastCrash = ""
+                Store.clearSteps()
+                launchCrash = ""
+            },
+            onCopy = {
+                val cm = appCtx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.setPrimaryClip(ClipData.newPlainText("MBox crash", launchCrash))
+                runCatching { Toast.makeText(appCtx, "Crash log copied", Toast.LENGTH_SHORT).show() }
+            },
+        )
     }
 }
 

@@ -66,6 +66,8 @@ class MBoxApp : Application(), ImageLoaderFactory {
                     append(android.os.Build.VERSION.RELEASE).append(" (API ")
                     append(android.os.Build.VERSION.SDK_INT).append(")\n\n")
                     append(buffer.toString().lines().take(40).joinToString("\n"))
+                    append("\n\n--- steps ---\n")
+                    append(Store.stepsText)
                 }
             }
             previous?.uncaughtException(thread, error)

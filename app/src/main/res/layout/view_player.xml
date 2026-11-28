@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TextureView instead of the default SurfaceView. Some MIUI/Transsion builds kill the process
+  when a SurfaceView is attached to a Compose AndroidView and the player starts in the same
+  frame ("MBox keeps stopping" with no Java stack). TextureView renders through the normal view
+  hierarchy and avoids that class of surface crash; the video itself is unaffected.
+-->
+<androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    app:resize_mode="fit"
+    app:show_buffering="never"
+    app:surface_type="texture_view"
+    app:use_controller="false" />

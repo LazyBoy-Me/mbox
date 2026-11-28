@@ -60,6 +60,8 @@ import app.mbox.Store
 import app.mbox.Subject
 import coil.compose.AsyncImage
 import androidx.compose.foundation.Image
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun MeScreen(
@@ -76,6 +78,16 @@ fun MeScreen(
     var confirmAdult by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     var showCrash by remember { mutableStateOf(false) }
+    var showLog by remember { mutableStateOf(false) }
+    var logText by remember { mutableStateOf("") }
+    var logLoaded by remember { mutableStateOf(false) }
+
+    LaunchedEffect(showLog) {
+        if (showLog && !logLoaded) {
+            logText = withContext(Dispatchers.IO) { readLogcat() }
+            logLoaded = true
+        }
+    }
 
     // Family Mode changes what history and My List may show; refresh both counters immediately.
     LaunchedEffect(family) {
@@ -281,10 +293,12 @@ fun MeScreen(
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Text("MBox $version", color = TextDim, fontSize = 13.sp)
                     val crash = remember { Store.lastCrash }
-                    if (crash.isNotBlank()) {
+                    val diedInPlayer = remember { Store.diedInPlayer }
+                    if (crash.isNotBlank() || diedInPlayer) {
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "Last crash: " + crash.lineSequence().first() + "  (tap for details)",
+                            (if (crash.isNotBlank()) "Last crash: " + crash.lineSequence().first()
+                            else "Last run ended inside the player.") + "  (tap for details)",
                             color = Color(0xFFFF8A80),
                             fontSize = 10.sp,
                             maxLines = 2,
@@ -309,6 +323,16 @@ fun MeScreen(
                         fontSize = 11.sp,
                         lineHeight = 16.sp,
                     )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Device log (tap to read)",
+                        color = Color(0xFF8AB4F8),
+                        fontSize = 11.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showLog = true }
+                            .padding(vertical = 4.dp),
+                    )
                 }
             }
         }
@@ -331,17 +355,40 @@ fun MeScreen(
     }
 
     if (showCrash) {
+        val crashText = buildString {
+            if (Store.lastCrash.isNotBlank()) {
+                append(Store.lastCrash)
+                append("\n\n")
+            }
+            append("--- steps ---\n")
+            append(Store.stepsText)
+        }
         CrashDialog(
-            text = Store.lastCrash,
+            text = crashText,
             onDismiss = { showCrash = false },
             onClear = {
                 Store.lastCrash = ""
+                Store.clearSteps()
                 showCrash = false
             },
             onCopy = {
                 val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                cm?.setPrimaryClip(ClipData.newPlainText("MBox crash", Store.lastCrash))
+                cm?.setPrimaryClip(ClipData.newPlainText("MBox crash", crashText))
                 showSimpleToast(ctx, "Crash log copied")
+            },
+        )
+    }
+
+    if (showLog) {
+        CrashDialog(
+            text = logText.ifBlank { "Reading log…" },
+            title = "Device log",
+            onDismiss = { showLog = false },
+            onClear = { showLog = false },
+            onCopy = {
+                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                cm?.setPrimaryClip(ClipData.newPlainText("MBox log", logText))
+                showSimpleToast(ctx, "Log copied")
             },
         )
     }
@@ -365,11 +412,12 @@ fun MeScreen(
  * copyable from inside the app.
  */
 @Composable
-private fun CrashDialog(
+fun CrashDialog(
     text: String,
     onDismiss: () -> Unit,
     onClear: () -> Unit,
     onCopy: () -> Unit,
+    title: String = "Last crash",
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -379,7 +427,7 @@ private fun CrashDialog(
                 .background(Color.White)
                 .padding(16.dp),
         ) {
-            Text("Last crash", color = Color(0xFF333333), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+            Text(title, color = Color(0xFF333333), fontSize = 16.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text(
                 text.ifBlank { "No crash recorded." },
@@ -501,6 +549,29 @@ private fun ConfirmDialog(
 private fun showSimpleToast(ctx: Context, message: String) {
     runCatching { Toast.makeText(ctx.applicationContext, message, Toast.LENGTH_SHORT).show() }
 }
+
+/**
+ * Reads the device log for this app. Without root an app only sees its own entries, which is
+ * exactly what we need: the crash from the previous run (including native "Fatal signal" lines
+ * that the Java uncaught handler cannot capture). MIUI may restrict logcat, so this fails soft.
+ */
+private fun readLogcat(): String = runCatching {
+    val process = ProcessBuilder("logcat", "-d", "-t", "1500", "-v", "threadtime")
+        .redirectErrorStream(true)
+        .start()
+    val text = process.inputStream.bufferedReader().use { it.readText() }
+    runCatching { process.waitFor(6, java.util.concurrent.TimeUnit.SECONDS) }
+    runCatching { process.destroy() }
+    val keep = Regex(
+        "mbox|AndroidRuntime|FATAL|Fatal signal|DEBUG|MediaCodec|ExoPlayer|Media3|libc|tombstone|crash|SIGSEGV|SIGABRT",
+        RegexOption.IGNORE_CASE,
+    )
+    val lines = text.lines().filter { keep.containsMatchIn(it) }
+    when {
+        lines.isEmpty() -> "No matching lines. This ROM may block logcat for apps.\n\nRaw size: ${text.length} chars"
+        else -> lines.takeLast(320).joinToString("\n")
+    }
+}.getOrElse { "logcat unavailable: ${it.javaClass.simpleName}: ${it.message}" }
 
 /**
  * The stock app's `dialog_adult_restricted`: white card, dark text, Back on the left and the
